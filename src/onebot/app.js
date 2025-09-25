@@ -2,11 +2,13 @@
 "use strict";
 
 const WebSocket = require("ws");
-const { buildRequestUrl, httpGetJson, httpGetBuffer } = require("../check");
-const { getBinPhotos, upsertBinPhotos, hasIssue, insertIssueIfNew, insertVoteRecord } = require("../db");
-const { listAllOpenIssues, parseBinAndUrlsFromText } = require("../github");
 const { WS_URL, ACCESS_TOKEN, ADMIN_GROUP_IDS } = require("./config");
-const { generateEcho, getMessagePlainText, extractReplyTargetMessageId, normalizeUrlForDedupe } = require("./utils");
+const { generateEcho, getMessagePlainText } = require("./utils");
+const { callApi } = require("./sender");
+const { startVoteForIssue, handleGroupReply, startTimer } = require("./features/vote");
+const { handleBinQuery } = require("./features/query");
+const { hasIssue, insertIssueIfNew } = require("../db");
+const { listAllOpenIssues, parseBinAndUrlsFromText } = require("../github");
 
 const pendingEchoMap = new Map();
 
@@ -53,24 +55,7 @@ function createWsClient() {
         const preview = getMessagePlainText(msg).slice(0, 120);
         console.log(`[OneBot] 收到消息: type=${msg.message_type} text="${preview}"`);
       } catch {}
-      if (msg.message_type === "group") {
-        const replyId = extractReplyTargetMessageId(msg);
-        if (replyId && messageIdToIssueKey.has(String(replyId))) {
-          const issueKey = messageIdToIssueKey.get(String(replyId));
-          const sess = issueSessions.get(issueKey);
-          const text = getMessagePlainText(msg);
-          const compact = (text || "").replace(/\s+/g, "");
-          if (/^通过$/i.test(compact)) {
-            sess.votes.set(String(msg.user_id), "approve");
-            try { insertVoteRecord({ owner: sess.owner, repo: sess.repo, number: sess.number, user_id: msg.user_id, intent: "approve", group_id: msg.group_id }); } catch {}
-            console.log(`[Vote] +1 通过 from ${msg.user_id} for ${replyId}`);
-          } else if (/^不通过$/i.test(compact)) {
-            sess.votes.set(String(msg.user_id), "reject");
-            try { insertVoteRecord({ owner: sess.owner, repo: sess.repo, number: sess.number, user_id: msg.user_id, intent: "reject", group_id: msg.group_id }); } catch {}
-            console.log(`[Vote] +1 不通过 from ${msg.user_id} for ${replyId}`);
-          }
-        }
-      }
+      if (msg.message_type === "group") handleGroupReply(ws, msg);
       handleIncomingMessage(ws, msg).catch((err) => {
         console.error("处理消息失败:", err.message || err);
       });
@@ -80,63 +65,12 @@ function createWsClient() {
   return ws;
 }
 
-// 多群联合投票
-const issueSessions = new Map();
-const messageIdToIssueKey = new Map();
+// 启动投票会话清理计时器
+startTimer();
 
 async function startVoteForIssue(ws, { owner, repo, number, parsed }) {
   if (!ADMIN_GROUP_IDS || ADMIN_GROUP_IDS.length === 0) return;
-  const issueKey = `${owner}/${repo}#${number}`;
-  let sess = issueSessions.get(issueKey);
-  const now = Date.now();
-  if (!sess) {
-    sess = {
-      issueKey,
-      owner,
-      repo,
-      number,
-      bin: parsed ? parsed.bin : null,
-      textUrls: parsed ? parsed.textUrls || [] : [],
-      attachUrls: parsed ? parsed.attachUrls || [] : [],
-      createdAt: now,
-      deadlineAt: now + 15 * 60 * 1000,
-      extended: false,
-      votes: new Map(),
-      groupIds: new Set(),
-      messageIds: new Set(),
-    };
-    issueSessions.set(issueKey, sess);
-  }
-
-  const issueUrl = `https://github.com/${owner}/${repo}/issues/${number}`;
-  const segments = [];
-  segments.push({ type: "text", data: { text: `您有新的审了吗订单 Issue #${number}，请及时处理\n` } });
-  segments.push({ type: "text", data: { text: `${issueUrl} }\n\n` } });
-  if (parsed && parsed.bin) segments.push({ type: "text", data: { text: `BIN: ${parsed.bin}\n` } });
-  const allUrls = [ ...(parsed?.attachUrls || []), ...(parsed?.textUrls || []) ];
-  const maxItems = Math.min(allUrls.length, 15);
-  const chosen = allUrls.slice(0, maxItems);
-  let buffers = [];
-  try { buffers = await Promise.all(chosen.map(async (u) => { try { return await httpGetBuffer(u); } catch { return null; } })); } catch {}
-  for (let i = 0; i < chosen.length; i++) {
-    const u = chosen[i];
-    const buf = buffers[i];
-    segments.push({ type: "text", data: { text: `[${u} ]\n` } });
-    if (buf && buf.length > 0) { segments.push({ type: "image", data: { file: `base64://${buf.toString("base64")}` } }); }
-    else { segments.push({ type: "text", data: { text: "(图片下载失败)\n" } }); }
-  }
-  segments.push({ type: "text", data: { text: "\n15分钟内回复本消息：通过 或 不通过（仅统计回复本消息的投票）" } });
-
-  for (const gid of ADMIN_GROUP_IDS) {
-    try {
-      const resp = await sendGroup(ws, gid, segments);
-      const messageId = resp && resp.data && (resp.data.message_id || resp.data.messageId || resp.data.message?.message_id);
-      if (!messageId) continue;
-      messageIdToIssueKey.set(String(messageId), issueKey);
-      sess.groupIds.add(gid);
-      sess.messageIds.add(String(messageId));
-    } catch {}
-  }
+  await startVoteForIssue(ws, { owner, repo, number, parsed, groupIds: ADMIN_GROUP_IDS });
 }
 
 async function finalizeSession(ws, sess) {
@@ -295,61 +229,8 @@ async function sendGroup(ws, groupId, message) {
 }
 
 async function handleIncomingMessage(ws, event) {
-  const rawText = getMessagePlainText(event);
-  const adminQQ = parseInt(process.env.ADMIN_QQ || "0", 10) || 0;
-  if (/^\s*binadd\b/i.test(rawText) && adminQQ && event.user_id === adminQQ) {
-    const text = rawText.replace(/^\s*binadd\b/i, "").trim();
-    const binMatch = text.match(/\b(\d{6})\b/);
-    const urlMatches = [...text.matchAll(/https?:\/\/\S+/gi)].map((m) => m[0]);
-    if (binMatch && urlMatches.length > 0) {
-      const ok = upsertBinPhotos(binMatch[1], urlMatches);
-      const reply = ok ? `已添加 BIN ${binMatch[1]} 的 ${urlMatches.length} 张图片` : `写入失败`;
-      await callApi(ws, "send_msg", { message_type: event.message_type, user_id: event.user_id, group_id: event.group_id, message: reply });
-    } else {
-      await callApi(ws, "send_msg", { message_type: event.message_type, user_id: event.user_id, group_id: event.group_id, message: "用法: binadd <包含6位BIN> <一个或多个https链接>" });
-    }
-    return;
-  }
-
-  const match = /^\s*bin\s+(\d+)\s*$/i.exec(rawText);
-  if (!match) return;
-  const bin = match[1];
-  const apiUrl = buildRequestUrl(bin);
-  let replyText;
-  let imageBase64List = [];
-  try {
-    const [remote] = await Promise.all([ httpGetJson(apiUrl) ]);
-    replyText = formatBinReply(remote, bin);
-    let photoUrls = getBinPhotos(bin);
-    if (photoUrls && photoUrls.length > 0) {
-      const seen = new Map();
-      const deduped = [];
-      for (const u of photoUrls) {
-        const key = normalizeUrlForDedupe(u);
-        if (seen.has(key)) continue;
-        seen.set(key, true);
-        deduped.push(u);
-      }
-      photoUrls = deduped;
-      const maxImages = Math.min(photoUrls.length, 15);
-      const slice = photoUrls.slice(0, maxImages);
-      const buffers = await Promise.all(slice.map(async (u) => { try { return await httpGetBuffer(u); } catch { return null; } }));
-      const validBuffers = buffers.filter((b) => b && b.length > 0);
-      imageBase64List = validBuffers.map((buf) => buf.toString("base64"));
-    } else {
-      const owner = process.env.GITHUB_OWNER; const repo = process.env.GITHUB_REPO;
-      if (owner && repo) {
-        const reportUrl = `https://github.com/${owner}/${repo}/issues/new?template=bin-photos.md`;
-        replyText += `\n\n查询不到卡面？通过以下链接进行卡面上报：\n${reportUrl}`;
-      }
-    }
-  } catch (err) {
-    replyText = `查询失败: ${err.message || err}`;
-  }
-  const segments = [{ type: "text", data: { text: replyText } }];
-  for (const base64 of imageBase64List) segments.push({ type: "image", data: { file: `base64://${base64}` } });
-  if (event.message_type === "private") await callApi(ws, "send_msg", { message_type: "private", user_id: event.user_id, message: imageBase64List.length > 0 ? segments : replyText });
-  else if (event.message_type === "group") await callApi(ws, "send_msg", { message_type: "group", group_id: event.group_id, message: imageBase64List.length > 0 ? segments : replyText });
+  const handled = await handleBinQuery(ws, event);
+  if (handled) return;
 }
 
 function formatBinReply(result, requestedBin) {
