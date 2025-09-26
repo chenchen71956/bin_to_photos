@@ -91,15 +91,23 @@ function postJson(url, token, body) {
 }
 
 function parseBinAndUrlsFromText(text) {
-	if (!text || typeof text !== "string") return null;
-	const binMatch = text.match(/\b(\d{6})\b/);
-	if (!binMatch) return null;
+    if (!text || typeof text !== "string") return null;
+    const normalized = normalizeFullWidth(text.replace(/[\u200B-\u200D\uFEFF]/g, ""));
+    // 优先匹配带标签的 BIN，兼容中文冒号
+    let bin = null;
+    const labeled = /BIN\s*[：:]*\s*(\d{6})/i.exec(normalized);
+    if (labeled) bin = labeled[1];
+    if (!bin) {
+        const any6 = /(?:^|[^0-9])(\d{6})(?!\d)/.exec(normalized);
+        if (any6) bin = any6[1];
+    }
+    if (!bin) return null;
 
 	// 分来源拆分：
 	// 1) 附件：来自 <img src="..."> 捕获到的链接
 	// 2) 文本：正文中出现的 https 链接（排除已归为附件的）
-	const attachRaw = [...text.matchAll(/src=["'](https?:\/\/[^"']+)["']/gi)].map((m) => m[1]);
-	const textRaw = [...text.matchAll(/https?:\/\/[^\s)\]">]+/gi)].map((m) => m[0]);
+    const attachRaw = [...normalized.matchAll(/src=["'](https?:\/\/[^"']+)["']/gi)].map((m) => m[1]);
+    const textRaw = [...normalized.matchAll(/https?:\/\/[^\s)\]">]+/gi)].map((m) => m[0]);
 
 	const attachClean = attachRaw.map(sanitizeUrl).filter(Boolean);
 	const textClean = textRaw
@@ -126,8 +134,8 @@ function parseBinAndUrlsFromText(text) {
 		textUrls.push(u);
 	}
 
-	if (textUrls.length === 0 && attachUrls.length === 0) return null;
-	return { bin: binMatch[1], textUrls, attachUrls };
+    if (textUrls.length === 0 && attachUrls.length === 0) return null;
+    return { bin, textUrls, attachUrls };
 }
 
 function sanitizeUrl(u) {
@@ -161,6 +169,10 @@ function isGithubIssueLink(u) {
 	} catch {
 		return false;
 	}
+}
+
+function normalizeFullWidth(s) {
+    return s.replace(/[\uFF10-\uFF19]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFF10 + 0x30));
 }
 
 async function listIssues({ owner, repo, token, page = 1, per_page = 100 }) {

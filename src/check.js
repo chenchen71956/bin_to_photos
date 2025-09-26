@@ -1,6 +1,32 @@
 "use strict";
 
 const https = require("https");
+const http = require("http");
+const httpsAgent = new https.Agent({ keepAlive: true });
+const httpAgent = new http.Agent({ keepAlive: true });
+let printedProxyHint = false;
+
+function pickProxyAgentFor(targetUrl) {
+	const rawProxy = process.env.IMG_PROXY_URL || process.env.TELEGRAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+	if (!rawProxy) return null;
+	try {
+		const p = new URL(rawProxy);
+		const proto = (p.protocol || "").toLowerCase();
+		if (!printedProxyHint) { try { console.log(`[HTTP] 使用代理下载图片: ${p.protocol}//${p.hostname}${p.port ? ":" + p.port : ""}`); } catch {} printedProxyHint = true; }
+		if (proto.startsWith("socks")) {
+			try {
+				const { SocksProxyAgent } = require("socks-proxy-agent");
+				return new SocksProxyAgent(rawProxy);
+			} catch {}
+		} else if (proto.startsWith("http")) {
+			try {
+				const { HttpsProxyAgent } = require("https-proxy-agent");
+				return new HttpsProxyAgent(rawProxy);
+			} catch {}
+		}
+	} catch {}
+	return null;
+}
 const { URL } = require("url");
 
 function buildRequestUrl(bin) {
@@ -49,14 +75,35 @@ async function checkBin(bin) {
 function httpGetBuffer(url) {
 	function fetchOnce(u, redirectsLeft) {
 		return new Promise((resolve, reject) => {
-			const req = https.get(u, (res) => {
+			let mod = https;
+			let agent = httpsAgent;
+			let options;
+			try {
+				const parsed = new URL(u);
+				mod = parsed.protocol === "http:" ? http : https;
+				const proxyAgent = pickProxyAgentFor(u);
+				agent = proxyAgent || (parsed.protocol === "http:" ? httpAgent : httpsAgent);
+				options = {
+					protocol: parsed.protocol,
+					hostname: parsed.hostname,
+					port: parsed.port || (parsed.protocol === "http:" ? 80 : 443),
+					path: parsed.pathname + (parsed.search || ""),
+					headers: { "User-Agent": "bin-to-photos/1.0", "Accept": "image/*", "Connection": "keep-alive" },
+					agent,
+				};
+			} catch {
+				options = u;
+			}
+			const req = mod.get(options, (res) => {
 				const status = res.statusCode || 0;
 				// 处理重定向
 				if ([301, 302, 303, 307, 308].includes(status)) {
 					const loc = res.headers && (res.headers.location || res.headers.Location);
 					if (loc && redirectsLeft > 0) {
 						res.resume();
-						return resolve(fetchOnce(loc, redirectsLeft - 1));
+						let nextUrl = loc;
+						try { nextUrl = new URL(loc, u).toString(); } catch {}
+						return resolve(fetchOnce(nextUrl, redirectsLeft - 1));
 					}
 					return reject(new Error(`HTTP redirect without location or too many redirects (${status})`));
 				}
@@ -71,12 +118,12 @@ function httpGetBuffer(url) {
 					return;
 				}
 
-				const chunks = [];
+			const chunks = [];
 				res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
 				res.on("end", () => resolve(Buffer.concat(chunks)));
 			});
 			req.on("error", (err) => reject(err));
-			req.setTimeout(20000, () => req.destroy(new Error("Request timed out")));
+		req.setTimeout(20000, () => req.destroy(new Error("Request timed out")));
 		});
 	}
 
