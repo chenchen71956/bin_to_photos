@@ -158,6 +158,69 @@ function upsertBinPhotos(bin, urls) {
 	}
 }
 
+// 单链接审核映射：将短 token 映射到完整 payload，避免 Telegram callback_data 长度限制
+function ensureSingleMapTable(db) {
+	try {
+		db.exec(
+			"CREATE TABLE IF NOT EXISTS tg_single_approvals (" +
+				"token TEXT PRIMARY KEY, " +
+				"owner TEXT, " +
+				"repo TEXT, " +
+				"number INTEGER, " +
+				"bin TEXT, " +
+				"url TEXT, " +
+				"created_at TEXT" +
+			")"
+		);
+	} catch {}
+}
+
+function insertSingleApprovalMap({ token, owner, repo, number, bin, url }) {
+	const db = safeGetDb();
+	if (!db) return false;
+	try {
+		ensureSingleMapTable(db);
+		const now = new Date().toISOString();
+		const stmt = db.prepare(
+			"INSERT OR REPLACE INTO tg_single_approvals (token, owner, repo, number, bin, url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+		);
+		const res = stmt.run(String(token), owner || null, repo || null, number != null ? Number(number) : null, bin != null ? String(bin) : null, url || null, now);
+		return !!(res && res.changes > 0);
+	} catch {
+		return false;
+	} finally {
+		try { db.close(); } catch {}
+	}
+}
+
+function getSingleApprovalByToken(token) {
+	const db = safeGetDb();
+	if (!db) return null;
+	try {
+		ensureSingleMapTable(db);
+		const row = db.prepare("SELECT token, owner, repo, number, bin, url FROM tg_single_approvals WHERE token = ?").get(String(token));
+		return row || null;
+	} catch {
+		return null;
+	} finally {
+		try { db.close(); } catch {}
+	}
+}
+
+function deleteSingleApprovalByToken(token) {
+	const db = safeGetDb();
+	if (!db) return false;
+	try {
+		ensureSingleMapTable(db);
+		const res = db.prepare("DELETE FROM tg_single_approvals WHERE token = ?").run(String(token));
+		return !!(res && res.changes > 0);
+	} catch {
+		return false;
+	} finally {
+		try { db.close(); } catch {}
+	}
+}
+
 function upsertBinPhotosSplit(bin, textUrls, attachUrls) {
 	if (!bin) return false;
 	const textList = Array.isArray(textUrls) ? textUrls : (typeof textUrls === "string" ? parsePhotosUrl(textUrls) : []);
@@ -202,11 +265,11 @@ function upsertBinPhotosSplit(bin, textUrls, attachUrls) {
 }
 
 function replaceBinPhotos(bin, urls) {
-    if (!bin) return false;
+    if (!bin) return { ok: false, inserted: false };
     const list = Array.isArray(urls) ? urls : (typeof urls === "string" ? parsePhotosUrl(urls) : []);
     const now = new Date().toISOString();
     const db = safeGetDb();
-    if (!db) return false;
+    if (!db) return { ok: false, inserted: false };
     try {
         const binStr = String(bin);
         const votedJson = JSON.stringify(list.map((u) => String(u).trim()).filter((u) => u.length > 0));
@@ -218,9 +281,9 @@ function replaceBinPhotos(bin, urls) {
             db.prepare("INSERT INTO bin_photos (bin, voted_urls, creat_at, update_at) VALUES (?, ?, ?, ?)")
               .run(binStr, votedJson, now, now);
         }
-        return true;
+        return { ok: true, inserted: !exists };
     } catch {
-        return false;
+        return { ok: false, inserted: false };
     } finally {
         try { db.close(); } catch {}
     }
@@ -322,6 +385,6 @@ function insertVoteRecord({ owner, repo, number, user_id, intent, group_id }) {
     }
 }
 
-module.exports = { getBinPhotos, DB_PATH, initDb, setDbPath, upsertBinPhotos, upsertBinPhotosSplit, replaceBinPhotos, hasIssue, insertIssueIfNew, insertTgPollMapping, getTgPollById, finalizeTgPoll };
+module.exports = { getBinPhotos, DB_PATH, initDb, setDbPath, upsertBinPhotos, upsertBinPhotosSplit, replaceBinPhotos, hasIssue, insertIssueIfNew, insertTgPollMapping, getTgPollById, finalizeTgPoll, insertSingleApprovalMap, getSingleApprovalByToken, deleteSingleApprovalByToken };
 
 

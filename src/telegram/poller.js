@@ -1,7 +1,8 @@
 "use strict";
 
-const { getUpdates, stopPoll } = require("./bot");
-const { insertTgPollMapping, getTgPollById, finalizeTgPoll, replaceBinPhotos } = require("../db");
+const { getUpdates, stopPoll, answerCallbackQuery } = require("./bot");
+const { insertTgPollMapping, getTgPollById, finalizeTgPoll, replaceBinPhotos, getSingleApprovalByToken, deleteSingleApprovalByToken } = require("../db");
+const { notifyNewBinInserted } = require("../onebot/index");
 const { closeIssue, createIssueComment } = require("../github");
 
 let lastUpdateId = 0;
@@ -25,6 +26,9 @@ async function startTelegramPolling() {
           const pa = upd.poll_answer;
           console.log(`[Telegram] poll_answer: poll_id=${pa.poll_id} user=${pa.user && pa.user.id} options=${Array.isArray(pa.option_ids) ? pa.option_ids.join(',') : ''}`);
           await handlePollAnswer(pa);
+        }
+        if (upd.callback_query) {
+          await handleCallback(upd.callback_query);
         }
       }
     } catch (e) {
@@ -55,9 +59,23 @@ async function handlePoll(poll) {
       if ((options[i].voter_count || 0) > 0) picked.push(urls[i]);
     }
     console.log(`[Telegram] poll 关闭: poll_id=${pollId}, picked=${picked.length}`);
+    const hasReject = picked.includes("__REJECT__");
+    if (hasReject) {
+      console.log(`[Telegram] 检测到不通过选项，立即关闭且不入库`);
+      const token = process.env.GITHUB_TOKEN;
+      if (token) {
+        const body = `上报的卡面被管理拒绝。BIN=${rec.bin || ''}`;
+        try { await createIssueComment({ owner: rec.owner, repo: rec.repo, number: rec.number, token, body }); } catch {}
+        try { await closeIssue({ owner: rec.owner, repo: rec.repo, number: rec.number, token }); } catch {}
+      }
+      return;
+    }
     if (rec.bin && picked.length > 0) {
-      const ok = replaceBinPhotos(rec.bin, picked);
-      console.log(`[DB] 覆盖写入集合: bin=${rec.bin}, count=${picked.length}, ok=${!!ok}`);
+      const res = replaceBinPhotos(rec.bin, picked);
+      console.log(`[DB] 覆盖写入集合: bin=${rec.bin}, count=${picked.length}, ok=${!!res.ok}, inserted=${!!res.inserted}`);
+      if (res && res.inserted) {
+        try { await notifyNewBinInserted(rec.bin, picked); } catch (e) { console.warn(`[OneBot] 管理群通知失败:`, e && e.message ? e.message : e); }
+      }
     } else {
       console.warn(`[DB] 跳过写入: bin=${rec.bin}, picked=${picked.length}`);
     }
@@ -84,9 +102,29 @@ async function handlePollAnswer(ans) {
     const pickedIdx = Array.isArray(ans.option_ids) ? ans.option_ids : [];
     const picked = pickedIdx.map((i) => urls[i]).filter(Boolean);
     console.log(`[Telegram] 首票: poll_id=${ans.poll_id}, pickedIdx=${pickedIdx.join(',')}, picked=${picked.length}`);
+    // 如果包含“不通过”，立即停止投票，不入库并关闭 issue
+    if (picked.includes("__REJECT__")) {
+      console.log(`[Telegram] 首票包含不通过，立即关闭投票，不入库`);
+      try {
+        const chatIdVal = /^-?\d+$/.test(String(rec.chat_id)) ? Number(rec.chat_id) : rec.chat_id;
+        const msgIdVal = Number(rec.message_id);
+        await stopPoll(chatIdVal, msgIdVal);
+      } catch {}
+      const token = process.env.GITHUB_TOKEN;
+      if (token) {
+        const body = `Telegram 多选投票包含“不通过”，已拒绝并关闭 issue`;
+        try { await createIssueComment({ owner: rec.owner, repo: rec.repo, number: rec.number, token, body }); } catch {}
+        try { await closeIssue({ owner: rec.owner, repo: rec.repo, number: rec.number, token }); } catch {}
+      }
+      finalizeTgPoll(ans.poll_id);
+      return;
+    }
     if (rec.bin && picked.length > 0) {
-      const ok = replaceBinPhotos(rec.bin, picked);
-      console.log(`[DB] 首票覆盖写入集合: bin=${rec.bin}, count=${picked.length}, ok=${!!ok}`);
+      const res = replaceBinPhotos(rec.bin, picked);
+      console.log(`[DB] 首票覆盖写入集合: bin=${rec.bin}, count=${picked.length}, ok=${!!res.ok}, inserted=${!!res.inserted}`);
+      if (res && res.inserted) {
+        try { await notifyNewBinInserted(rec.bin, picked); } catch (e) { console.warn(`[OneBot] 管理群通知失败:`, e && e.message ? e.message : e); }
+      }
     } else {
       console.warn(`[DB] 首票跳过写入: bin=${rec.bin}, picked=${picked.length}`);
     }
@@ -109,6 +147,35 @@ async function handlePollAnswer(ans) {
     }
   } finally {
     try { finalizeTgPoll(ans.poll_id); console.log(`[Telegram] 首票完成，已 finalize poll_id=${ans.poll_id}`); } catch {}
+  }
+}
+
+async function handleCallback(cb) {
+  try {
+    const id = cb.id;
+    const dataRaw = cb.data;
+    let data;
+    try { data = JSON.parse(String(dataRaw || "")); } catch { data = null; }
+    if (!data || !data.t || !data.k) return;
+    const rec = getSingleApprovalByToken(data.k);
+    if (!rec || !rec.url || !rec.bin) return;
+    if (data.t === "single_ok") {
+      const res = replaceBinPhotos(rec.bin, [rec.url]);
+      console.log(`[Telegram] 单链接审核通过: bin=${rec.bin}, ok=${!!res.ok}, inserted=${!!res.inserted}`);
+      try { await answerCallbackQuery(id, "已通过"); } catch {}
+      try { await notifyNewBinInserted(rec.bin, [rec.url]); } catch {}
+    } else if (data.t === "single_ng") {
+      try { await answerCallbackQuery(id, "已拒绝"); } catch {}
+      const token = process.env.GITHUB_TOKEN;
+      if (token && rec && rec.owner && rec.repo && rec.number != null) {
+        const body = `上报的卡面被管理拒绝。BIN=${rec.bin || ''}`;
+        try { await createIssueComment({ owner: rec.owner, repo: rec.repo, number: rec.number, token, body }); } catch {}
+        try { await closeIssue({ owner: rec.owner, repo: rec.repo, number: rec.number, token }); } catch {}
+      }
+    }
+    try { deleteSingleApprovalByToken(data.k); } catch {}
+  } catch (e) {
+    console.warn(`[Telegram] handleCallback 异常:`, e && e.message ? e.message : e);
   }
 }
 

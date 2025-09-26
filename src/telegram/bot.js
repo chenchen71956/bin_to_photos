@@ -102,7 +102,10 @@ async function sendMediaGroup({ urls }) {
 
 async function sendPhotoPoll({ question, options, allows_multiple_answers = true }) {
   if (!TG_BOT_TOKEN || !Array.isArray(TG_CHAT_IDS) || TG_CHAT_IDS.length === 0) return;
-  const pollOptions = options.map((u, idx) => `${idx + 1}. ${getHost(u)}`);
+  const pollOptions = options.map((u, idx) => {
+    if (u === "__REJECT__") return `${idx + 1}. 不通过`;
+    return `${idx + 1}. ${getHost(u)}`;
+  });
   const sent = [];
   for (const chatId of TG_CHAT_IDS) {
     const resp = await tgApi("sendPoll", { chat_id: chatId, question, options: pollOptions, allows_multiple_answers, is_anonymous: false });
@@ -115,7 +118,7 @@ async function sendPhotoPoll({ question, options, allows_multiple_answers = true
 
 async function getUpdates(offset) {
   if (!TG_BOT_TOKEN) return null;
-  const resp = await tgApi("getUpdates", { offset, timeout: 25, allowed_updates: ["poll", "poll_answer"] });
+  const resp = await tgApi("getUpdates", { offset, timeout: 25, allowed_updates: ["poll", "poll_answer", "callback_query"] });
   return resp && resp.ok ? resp.result : [];
 }
 
@@ -124,6 +127,32 @@ async function stopPoll(chat_id, message_id) {
   return await tgApi("stopPoll", { chat_id, message_id });
 }
 
-module.exports = { sendPhotoPoll, getUpdates, sendMediaGroup, shortenUrl, stopPoll };
+const crypto = require("crypto");
+
+async function sendSingleApproval({ url, bin, chatId, owner, repo, number }) {
+  if (!TG_BOT_TOKEN || !chatId) return null;
+  const caption = `BIN ${bin} 单链接审核\n${shortenUrl(url)}`;
+  // 使用短 token 映射，避免 callback_data 过长
+  let token;
+  try { token = crypto.randomBytes(8).toString("hex"); } catch { token = String(Date.now()); }
+  try {
+    const { insertSingleApprovalMap } = require("../db");
+    insertSingleApprovalMap({ token, owner, repo, number, bin, url });
+  } catch {}
+  const reply_markup = {
+    inline_keyboard: [[
+      { text: "通过", callback_data: JSON.stringify({ t: "single_ok", k: token }) },
+      { text: "不通过", callback_data: JSON.stringify({ t: "single_ng", k: token }) },
+    ]],
+  };
+  return await tgApi("sendPhoto", { chat_id: chatId, photo: url, caption, reply_markup });
+}
+
+async function answerCallbackQuery(id, text) {
+  if (!TG_BOT_TOKEN || !id) return null;
+  return await tgApi("answerCallbackQuery", { callback_query_id: id, text, show_alert: false });
+}
+
+module.exports = { sendPhotoPoll, getUpdates, sendMediaGroup, shortenUrl, stopPoll, sendSingleApproval, answerCallbackQuery };
 
 
