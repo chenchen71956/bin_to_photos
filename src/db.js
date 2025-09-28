@@ -64,6 +64,13 @@ function safeGetDb() {
 				"finalized INTEGER DEFAULT 0" +
 			")"
 		);
+		// admin_notified：确保每个 BIN 的管理员通知只发送一次
+		db.exec(
+			"CREATE TABLE IF NOT EXISTS admin_notified (" +
+				"bin TEXT PRIMARY KEY, " +
+				"created_at TEXT" +
+			")"
+		);
 	} catch {}
 	return db;
 }
@@ -115,6 +122,25 @@ function getBinPhotos(bin) {
         if (!row || !row.voted_urls) return [];
         // 不做去重，按集合原样返回
         return parsePhotosUrl(row.voted_urls);
+	} catch {
+		return [];
+	} finally {
+		try { db.close(); } catch {}
+	}
+}
+
+function getAllVotedUrls() {
+	const db = safeGetDb();
+	if (!db) return [];
+	try {
+		const rows = db.prepare("SELECT voted_urls FROM bin_photos").all();
+		const out = [];
+		for (const r of rows) {
+			if (!r || !r.voted_urls) continue;
+			const arr = parsePhotosUrl(r.voted_urls);
+			for (const u of arr) { out.push(String(u)); }
+		}
+		return out;
 	} catch {
 		return [];
 	} finally {
@@ -219,6 +245,19 @@ function deleteSingleApprovalByToken(token) {
 	} finally {
 		try { db.close(); } catch {}
 	}
+}
+
+function tryMarkAdminNotified(bin) {
+	const db = safeGetDb();
+	if (!db) return { ok: false, inserted: false };
+	try {
+		const now = new Date().toISOString();
+		const stmt = db.prepare("INSERT OR IGNORE INTO admin_notified (bin, created_at) VALUES (?, ?)");
+		const res = stmt.run(String(bin), now);
+		return { ok: true, inserted: !!(res && res.changes > 0) };
+	} catch {
+		return { ok: false, inserted: false };
+	} finally { try { db.close(); } catch {} }
 }
 
 function upsertBinPhotosSplit(bin, textUrls, attachUrls) {
@@ -385,6 +424,6 @@ function insertVoteRecord({ owner, repo, number, user_id, intent, group_id }) {
     }
 }
 
-module.exports = { getBinPhotos, DB_PATH, initDb, setDbPath, upsertBinPhotos, upsertBinPhotosSplit, replaceBinPhotos, hasIssue, insertIssueIfNew, insertTgPollMapping, getTgPollById, finalizeTgPoll, insertSingleApprovalMap, getSingleApprovalByToken, deleteSingleApprovalByToken };
+module.exports = { getBinPhotos, getAllVotedUrls, DB_PATH, initDb, setDbPath, upsertBinPhotos, upsertBinPhotosSplit, replaceBinPhotos, hasIssue, insertIssueIfNew, insertTgPollMapping, getTgPollById, finalizeTgPoll, insertSingleApprovalMap, getSingleApprovalByToken, deleteSingleApprovalByToken, tryMarkAdminNotified };
 
 

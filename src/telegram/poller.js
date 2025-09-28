@@ -2,7 +2,7 @@
 
 const { getUpdates, stopPoll, answerCallbackQuery } = require("./bot");
 const { insertTgPollMapping, getTgPollById, finalizeTgPoll, replaceBinPhotos, getSingleApprovalByToken, deleteSingleApprovalByToken } = require("../db");
-const { notifyNewBinInserted } = require("../onebot/index");
+const { notifyNewBinInserted } = require("../onebot/notifier");
 const { closeIssue, createIssueComment } = require("../github");
 
 let lastUpdateId = 0;

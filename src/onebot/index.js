@@ -3,9 +3,12 @@
 
 require("dotenv").config();
 const WebSocket = require("ws");
+const fs = require("fs");
+const path = require("path");
 const { buildRequestUrl, httpGetJson, httpGetBuffer } = require("../check");
-const { getBinPhotos, initDb, hasIssue, insertIssueIfNew } = require("../db");
+const { getBinPhotos, initDb, hasIssue, insertIssueIfNew, getAllVotedUrls } = require("../db");
 const { listAllOpenIssues, parseBinAndUrlsFromText } = require("../github");
+const { setSender } = require("./notifier");
 const { sendPhotoPoll, sendMediaGroup } = require("../telegram/bot");
 const { startTelegramPolling, insertTgPollMapping } = require("../telegram/poller");
 
@@ -48,6 +51,154 @@ function getMessagePlainText(event) {
   return "";
 }
 
+async function handleTenCardMosaic(ws, event) {
+  try { console.log("[TenCard] 收到十卡图请求"); } catch {}
+  const urls = (getAllVotedUrls() || []).slice(0); // 全库
+  if (!urls.length) {
+    const msg = "库内暂无卡面，先去上报吧～";
+    const payload = event.message_type === "group"
+      ? { message_type: "group", group_id: event.group_id, message: msg }
+      : { message_type: "private", user_id: event.user_id, message: msg };
+    await callApi(ws, "send_msg", payload, 15000);
+    return;
+  }
+
+  // 下载所有图片（限并发），保持原分辨率，以最小缩放适配统一方格，拼接为正方形
+  const maxTiles = 100; // 最多 10x10 张
+  const slice = urls.slice(0, maxTiles);
+  const concurrency = 3;
+  const buffers = new Array(slice.length);
+  let next = 0;
+  async function fetchOne(i) {
+    const u = slice[i];
+    try {
+      const buf = await httpGetBuffer(u);
+      buffers[i] = buf && buf.length > 0 ? buf : null;
+    } catch { buffers[i] = null; }
+  }
+  async function worker() {
+    while (true) { const i = next++; if (i >= slice.length) break; await fetchOne(i); }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, slice.length) }, () => worker()));
+  const valid = buffers.map((b, i) => ({ buf: b, url: slice[i] })).filter(x => x.buf && x.buf.length > 0);
+  if (!valid.length) {
+    const msg = "下载失败：暂无可用图片";
+    const payload = event.message_type === "group"
+      ? { message_type: "group", group_id: event.group_id, message: msg }
+      : { message_type: "private", user_id: event.user_id, message: msg };
+    await callApi(ws, "send_msg", payload, 15000);
+    return;
+  }
+
+  // 两排紧凑排布：横卡在上、竖卡在下；不缩放不放大，图片之间无间隔
+  const Jimp = require("jimp");
+  const loaded = [];
+  for (const v of valid) {
+    try {
+      const img = await Jimp.read(v.buf);
+      loaded.push({ img, w: img.bitmap.width, h: img.bitmap.height });
+    } catch {}
+  }
+  const horiz = loaded.filter(it => it.w >= it.h);
+  const vert = loaded.filter(it => it.w < it.h);
+
+  // 统一尺寸：按行分别统一高度（可通过环境变量调整）
+  const targetTopH = Math.max(64, Number(process.env.TEN_CARD_TOP_H || 360));
+  const targetBottomH = Math.max(64, Number(process.env.TEN_CARD_BOTTOM_H || 360));
+  const resizedTop = [];
+  const resizedBottom = [];
+  for (const it of horiz) {
+    const scale = targetTopH / it.h;
+    const w = Math.max(1, Math.round(it.w * scale));
+    const h = targetTopH;
+    const clone = it.img.clone();
+    clone.resize(w, h, Jimp.RESIZE_BILINEAR);
+    resizedTop.push({ img: clone, w, h });
+  }
+  // 竖卡宽度对齐到“半张横卡”的宽度（用上排平均宽度作为单位宽）
+  const unitW = resizedTop.length > 0 ? Math.max(1, Math.round(resizedTop.reduce((s, it) => s + it.w, 0) / resizedTop.length)) : null;
+  for (const it of vert) {
+    const clone = it.img.clone();
+    if (unitW && it.w > 0) {
+      const w = Math.max(1, Math.round(unitW / 2));
+      const scale = w / it.w;
+      const h = Math.max(1, Math.round(it.h * scale));
+      clone.resize(w, h, Jimp.RESIZE_BILINEAR);
+      resizedBottom.push({ img: clone, w, h });
+    } else {
+      // 无横卡可参考时，退回到底行统一高度方案
+      const scale = targetBottomH / it.h;
+      const w = Math.max(1, Math.round(it.w * scale));
+      const h = targetBottomH;
+      clone.resize(w, h, Jimp.RESIZE_BILINEAR);
+      resizedBottom.push({ img: clone, w, h });
+    }
+  }
+  // 目标宽度取总面积的平方根，尽量接近正方形；且不小于单张最大宽
+  const allForArea = [...resizedTop, ...resizedBottom];
+  const totalArea = allForArea.reduce((s, it) => s + (it.w * it.h), 0);
+  let targetWidth = Math.max(1, Math.round(Math.sqrt(Math.max(1, totalArea))));
+  const maxSingleW = allForArea.length ? Math.max(...allForArea.map(it => it.w)) : 1;
+  targetWidth = Math.max(maxSingleW, targetWidth);
+
+  function buildRows(list, limitW) {
+    const rows = [];
+    let cur = [];
+    let w = 0;
+    let h = 0;
+    for (const it of list) {
+      if (cur.length > 0 && (w + it.w) > limitW) {
+        rows.push({ items: cur, width: w, height: h });
+        cur = [];
+        w = 0;
+        h = 0;
+      }
+      cur.push(it);
+      w += it.w;
+      h = Math.max(h, it.h);
+    }
+    if (cur.length) rows.push({ items: cur, width: w, height: h });
+    return rows;
+  }
+
+  const rowsTop = buildRows(resizedTop, targetWidth);
+  const rowsBottom = buildRows(resizedBottom, targetWidth);
+  const rows = [...rowsTop, ...rowsBottom];
+  const mosaicW = Math.max(1, rows.length ? Math.max(...rows.map(r => r.width)) : 1);
+  const mosaicH = rows.reduce((s, r) => s + r.height, 0);
+
+  const canvas = await new Jimp(mosaicW, Math.max(1, mosaicH), 0xffffffff);
+
+  // 绘制所有行（横排优先，竖排随后），达到接近正方形的效果
+  let y = 0;
+  for (const row of rows) {
+    let x = 0;
+    for (const it of row.items) {
+      canvas.composite(it.img, x, y);
+      x += it.w;
+    }
+    y += row.height;
+  }
+
+  const outBuf = await canvas.getBufferAsync(Jimp.MIME_PNG);
+  // 保存到 .tmp 目录
+  try {
+    const tmpDir = path.join(__dirname, "..", "..", ".tmp");
+    if (!fs.existsSync(tmpDir)) { fs.mkdirSync(tmpDir, { recursive: true }); }
+    const file = path.join(tmpDir, `ten_card_${Date.now()}.png`);
+    fs.writeFileSync(file, outBuf);
+    try { console.log(`[TenCard] 已保存: ${file}`); } catch {}
+  } catch (e) {
+    try { console.warn(`[TenCard] 保存到 .tmp 失败: ${e && e.message ? e.message : e}`); } catch {}
+  }
+  const b64 = outBuf.toString("base64");
+  const imageSeg = [{ type: "image", data: { file: `base64://${b64}` } }];
+  const payload = event.message_type === "group"
+    ? { message_type: "group", group_id: event.group_id, message: imageSeg }
+    : { message_type: "private", user_id: event.user_id, message: imageSeg };
+  await callApi(ws, "send_msg", payload, 30000);
+}
+
 function callApi(ws, action, params, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     if (ws.readyState !== WebSocket.OPEN) return reject(new Error("WS 未连接"));
@@ -73,6 +224,11 @@ function callApi(ws, action, params, timeoutMs = 15000) {
 
 async function handleIncomingMessage(ws, event) {
   const rawText = getMessagePlainText(event);
+  // 十卡图：输出库内所有卡面，拼成正方形，不降低分辨率
+  if (/^\s*(?:十卡图|10卡图|十卡|十图)\s*$/i.test(rawText)) {
+    await handleTenCardMosaic(ws, event);
+    return;
+  }
   const match = /^\s*bin\s+(\d+)\s*$/i.exec(rawText);
   if (!match) return;
 
@@ -92,6 +248,24 @@ async function handleIncomingMessage(ws, event) {
     ]);
     try { console.log(`[BIN] 远端BIN接口完成: ${Date.now() - tRemote}ms`); } catch {}
     replyText = formatBinReply(remote, bin);
+
+    // 地区黑名单拦截：MACAU / HONG KONG / TAIWAN
+    try {
+      const countryRaw = String(remote && remote.country ? remote.country : "").toUpperCase();
+      const normalized = countryRaw.replace(/\s+/g, "");
+      const blocked = normalized === "MACAU" || normalized === "HONGKONG" || normalized.includes("TAIWAN");
+      if (blocked) {
+        console.warn(`[BIN] 命中地区黑名单: country=${countryRaw}`);
+        replyText = "此BIN的发卡地被禁止！";
+        const segments = [{ type: "text", data: { text: replyText } }];
+        if (event.message_type === "private") {
+          await callApi(ws, "send_msg", { message_type: "private", user_id: event.user_id, message: segments }, 15000);
+        } else if (event.message_type === "group") {
+          await callApi(ws, "send_msg", { message_type: "group", group_id: event.group_id, message: segments }, 15000);
+        }
+        return;
+      }
+    } catch {}
 
     const photoUrls = getBinPhotos(bin) || [];
     try { console.log(`[BIN] DB 返回图片链接: ${photoUrls.length}`); } catch {}
@@ -332,6 +506,11 @@ function main() {
   }
   const ws = new WebSocket(WS_URL, { headers });
   globalOnebotWs = ws;
+  // 提供一个统一 sender 给通知模块，避免循环依赖
+  setSender(async (groupId, message, timeoutMs) => {
+    const payload = { message_type: "group", group_id: groupId, message };
+    await callApi(ws, "send_msg", payload, timeoutMs || 15000);
+  });
 
   ws.on("open", () => {
     console.log(`[OneBot] 已连接: ${WS_URL}`);
@@ -469,6 +648,6 @@ if (require.main === module) {
 }
 
 module.exports = { main };
-module.exports.notifyNewBinInserted = notifyNewBinInserted;
+// notifyNewBinInserted 已迁移到 notifier，避免循环依赖
 
 
