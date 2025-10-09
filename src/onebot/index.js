@@ -51,7 +51,7 @@ function getMessagePlainText(event) {
   return "";
 }
 
-async function handleTenCardMosaic(ws, event) {
+async function handleTenCardMosaic(ws, event, mode) {
   try { console.log("[TenCard] 收到十卡图请求"); } catch {}
   const urls = (getAllVotedUrls() || []).slice(0); // 全库
   if (!urls.length) {
@@ -224,9 +224,17 @@ function callApi(ws, action, params, timeoutMs = 15000) {
 
 async function handleIncomingMessage(ws, event) {
   const rawText = getMessagePlainText(event);
-  // 十卡图：输出库内所有卡面，拼成正方形，不降低分辨率
+  // 十卡图 / 百卡图 / 万卡图：输出库内所有卡面，近正方形拼接
   if (/^\s*(?:十卡图|10卡图|十卡|十图)\s*$/i.test(rawText)) {
-    await handleTenCardMosaic(ws, event);
+    await handleTenCardMosaic(ws, event, "all");
+    return;
+  }
+  if (/^\s*(?:百卡图|100卡图|百卡)\s*$/i.test(rawText)) {
+    await handleTenCardMosaic(ws, event, "all");
+    return;
+  }
+  if (/^\s*(?:万卡图|10000卡图|万卡)\s*$/i.test(rawText)) {
+    await handleTenCardMosaic(ws, event, "all");
     return;
   }
   const match = /^\s*bin\s+(\d+)\s*$/i.exec(rawText);
@@ -248,6 +256,15 @@ async function handleIncomingMessage(ws, event) {
     ]);
     try { console.log(`[BIN] 远端BIN接口完成: ${Date.now() - tRemote}ms`); } catch {}
     replyText = formatBinReply(remote, bin);
+
+    // 防打扰：查不到品牌则不回复（群聊与私聊都不回）
+    try {
+      const brandRaw = String(remote && remote.brand != null ? remote.brand : "").trim();
+      if (!brandRaw) {
+        console.log(`[BIN] 品牌为空，不回复 bin=${bin}`);
+        return; // 直接结束，不再继续下载图片与发送
+      }
+    } catch {}
 
     // 地区黑名单拦截：MACAU / HONG KONG / TAIWAN
     try {
