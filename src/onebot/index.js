@@ -469,13 +469,12 @@ async function handleIncomingMessage(ws, event) {
   for (const base64 of imageBase64List) {
     segments.push({ type: "image", data: { file: `base64://${base64}` } });
   }
+  // 若既无信息图也无卡面，则回退发送文本 BIN 信息
+  if (segments.length === 0) {
+    segments.push({ type: "text", data: { text: replyText } });
+  }
 
   try { console.log(`[BIN] 准备发送: images=${imageBase64List.length}, text_len=${(replyText || "").length}`); } catch {}
-
-  if (segments.length === 0) {
-    console.log("[BIN] 无卡面图片可发送，静默不回复");
-    return;
-  }
   const sendPayloadPrivate = { message_type: "private", user_id: event.user_id, message: segments };
   const sendPayloadGroup = { message_type: "group", group_id: event.group_id, message: segments };
   const tSend = Date.now();
@@ -517,7 +516,8 @@ async function handleIncomingMessage(ws, event) {
           return await withRetry(() => callApi(ws, "send_msg", grp, timeoutMs), "send_msg-fallback");
         }
       };
-      // 无文本回退，保持静默，仅逐图发送
+      // 文本回退：至少发送 BIN 文本信息
+      await sendSingle(replyText);
       // 逐图
       for (const base64 of imageBase64List) {
         const imageSeg = [{ type: "image", data: { file: `base64://${base64}` } }];
