@@ -51,76 +51,7 @@ function getMessagePlainText(event) {
   return "";
 }
 
-function xmlEscape(s) {
-  const str = String(s == null ? "" : s);
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
-function renderBinInfoSvg(result, requestedBin) {
-  const empty = "---";
-  const data = (result && typeof result === "object") ? result : {};
-  const v = (key) => {
-    const val = data[key];
-    if (val === undefined || val === null) return empty;
-    if (typeof val === "string" && val.trim() === "") return empty;
-    return String(val);
-  };
-  const valueOr = (value) => {
-    if (value === undefined || value === null) return empty;
-    if (typeof value === "string" && value.trim() === "") return empty;
-    return String(value);
-  };
-
-  const lines = [
-    `BIN：${valueOr(data.bin || requestedBin)}`,
-    `品牌：${v("brand")}`,
-    `類型：${v("type")}`,
-    `卡片等級：${v("category")}`,
-    `發卡行：${v("issuer")}`,
-    `國家：${v("country")}`,
-    `發卡行電話：${v("issuerPhone")}`,
-    `發卡行網址：${v("issuerUrl")}`,
-  ];
-
-  const width = 800;
-  const padding = 28;
-  const titleSize = 28;
-  const lineSize = 20;
-  const lineGap = 10;
-  const titleGap = 16;
-  const totalHeight = padding + titleSize + titleGap + lines.length * (lineSize + lineGap) - lineGap + padding;
-
-  const title = `BIN 資訊`;
-  const fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, "PingFang SC", "Noto Sans CJK SC", "Microsoft Yahei", Arial, sans-serif';
-
-  let y = padding;
-  const x = padding;
-  const svgLines = [];
-  svgLines.push(`<text x="${x}" y="${y + titleSize}" font-size="${titleSize}" font-family="${xmlEscape(fontFamily)}" fill="#111" font-weight="600">${xmlEscape(title)}</text>`);
-  y += titleSize + titleGap;
-  for (const line of lines) {
-    svgLines.push(`<text x="${x}" y="${y + lineSize}" font-size="${lineSize}" font-family="${xmlEscape(fontFamily)}" fill="#222">${xmlEscape(line)}</text>`);
-    y += lineSize + lineGap;
-  }
-
-  const svg = `<?xml version="1.0" encoding="UTF-8"?>\n` +
-`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${totalHeight}" viewBox="0 0 ${width} ${totalHeight}">` +
-`<defs>` +
-`  <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">` +
-`    <stop offset="0%" stop-color="#ffffff"/>` +
-`    <stop offset="100%" stop-color="#f6f7fb"/>` +
-`  </linearGradient>` +
-`</defs>` +
-`<rect x="0" y="0" width="${width}" height="${totalHeight}" fill="url(#bg)"/>` +
-`<g>` + svgLines.join("") + `</g>` +
-`</svg>`;
-  return svg;
-}
+// 已移除 binsvg/SVG 渲染相关实现
 
 async function handleTenCardMosaic(ws, event, mode) {
   try { console.log("[TenCard] 收到十卡图请求"); } catch {}
@@ -295,33 +226,7 @@ function callApi(ws, action, params, timeoutMs = 15000) {
 
 async function handleIncomingMessage(ws, event) {
   const rawText = getMessagePlainText(event);
-  // binsvg 命令：渲染 BIN 信息为 SVG，保存到 .tmp，仅返回保存路径
-  const svgMatch = /^\s*binsvg\s+(\d+)\s*$/i.exec(rawText);
-  if (svgMatch) {
-    const bin = svgMatch[1];
-    const url = buildRequestUrl(bin);
-    try {
-      const remote = await httpGetJson(url);
-      const brandRaw = String(remote && remote.brand != null ? remote.brand : "").trim();
-      if (!brandRaw) {
-        console.log(`[BIN][SVG] 品牌为空，不生成、不回复 bin=${bin}`);
-        return;
-      }
-      const svg = renderBinInfoSvg(remote, bin);
-      const tmpDir = path.join(__dirname, "..", "..", ".tmp");
-      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-      const file = path.join(tmpDir, `bin_${bin}_${Date.now()}.svg`);
-      fs.writeFileSync(file, svg, { encoding: "utf8" });
-      const msg = `SVG 已保存：${file}`;
-      const payload = event.message_type === "group"
-        ? { message_type: "group", group_id: event.group_id, message: msg }
-        : { message_type: "private", user_id: event.user_id, message: msg };
-      await callApi(ws, "send_msg", payload, 15000);
-    } catch (e) {
-      console.warn(`[BIN][SVG] 生成失败: ${e && e.message ? e.message : e}`);
-    }
-    return;
-  }
+  // 已移除 binsvg 命令
   // 十卡图 / 百卡图 / 万卡图：输出库内所有卡面，近正方形拼接
   if (/^\s*(?:十卡图|10卡图|十卡|十图)\s*$/i.test(rawText)) {
     await handleTenCardMosaic(ws, event, "all");
@@ -347,8 +252,10 @@ async function handleIncomingMessage(ws, event) {
 
   let replyText;
   let imageBase64List = [];
-  let svgSavedPath = null;
   let pngBase64 = null;
+  let jpgBase64 = null;
+  let pngSavedPath = null;
+  let jpgSavedPath = null;
   try {
     const tRemote = Date.now();
     const [remote] = await Promise.all([
@@ -384,14 +291,12 @@ async function handleIncomingMessage(ws, event) {
       }
     } catch {}
 
-    // 先生成 SVG（替换原文本消息），并转换为高分辨率 PNG 发送
+    // 先生成 SVG（内部矢量用于清晰文本），再转换为 PNG（失败则转 JPG）发送
     try {
       const svg = renderBinInfoSvg(remote, bin);
       const tmpDir = path.join(__dirname, "..", "..", ".tmp");
       if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-      svgSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}.svg`);
-      fs.writeFileSync(svgSavedPath, svg, { encoding: "utf8" });
-      try { console.log(`[BIN] SVG 已生成: ${svgSavedPath}`); } catch {}
+      // 不再落盘 svg，直接内存渲染，提高整体性能
       try {
         const density = Math.max(72, Number(process.env.SVG_DENSITY || 192));
         let sharpLib = null;
@@ -400,18 +305,34 @@ async function handleIncomingMessage(ws, event) {
           const pngBuf = await sharpLib(Buffer.from(svg, "utf8"), { density }).png({ compressionLevel: 9 }).toBuffer();
           if (pngBuf && pngBuf.length > 0) {
             pngBase64 = pngBuf.toString("base64");
+            // 同步保存 PNG 以便故障排查/回退
+            try {
+              pngSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.png`);
+              fs.writeFileSync(pngSavedPath, pngBuf);
+            } catch {}
             try { console.log(`[BIN] PNG 渲染完成 size=${pngBuf.length}B density=${density}`); } catch {}
           }
+          if (!pngBase64) {
+            const jpgBuf = await sharpLib(Buffer.from(svg, "utf8"), { density }).jpeg({ quality: 90 }).toBuffer();
+            if (jpgBuf && jpgBuf.length > 0) {
+              jpgBase64 = jpgBuf.toString("base64");
+              try {
+                jpgSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.jpg`);
+                fs.writeFileSync(jpgSavedPath, jpgBuf);
+              } catch {}
+              try { console.log(`[BIN] JPG 渲染完成 size=${jpgBuf.length}B density=${density}`); } catch {}
+            }
+          }
         } else {
-          console.warn("[BIN] 未安装 sharp，无法将 SVG 转 PNG，将回退到文本路径");
+          console.warn("[BIN] 未安装 sharp，无法将 SVG 转 PNG/JPG，将回退到文本路径");
         }
       } catch (e2) {
-        try { console.warn(`[BIN] SVG->PNG 失败: ${e2 && e2.message ? e2.message : e2}`); } catch {}
+        try { console.warn(`[BIN] SVG->PNG/JPG 失败: ${e2 && e2.message ? e2.message : e2}`); } catch {}
       }
     } catch (e) {
       try { console.warn(`[BIN] 生成 SVG 失败: ${e && e.message ? e.message : e}`); } catch {}
-      svgSavedPath = null;
       pngBase64 = null;
+      jpgBase64 = null;
     }
 
     const photoUrls = getBinPhotos(bin) || [];
@@ -472,12 +393,15 @@ async function handleIncomingMessage(ws, event) {
   const segments = [];
   if (pngBase64) {
     segments.push({ type: "image", data: { file: `base64://${pngBase64}` } });
-  } else if (svgSavedPath) {
-    // 若 base64 方案不可用，仍保留一个提示文本
-    segments.push({ type: "text", data: { text: `SVG 已保存：${svgSavedPath}` } });
+  } else if (jpgBase64) {
+    segments.push({ type: "image", data: { file: `base64://${jpgBase64}` } });
+  } else if (pngSavedPath || jpgSavedPath) {
+    // 若图片段不可用，仍保留一个提示文本
+    const p = pngSavedPath || jpgSavedPath;
+    segments.push({ type: "text", data: { text: `图片已保存：${p}` } });
   } else {
-    // 最后兜底：保留旧文本（仅在 SVG 全面失败时）
-    segments.push({ type: "text", data: { text: replyText } });
+    // 最后兜底：仅发提示文本（不再发 BIN 纯文本）
+    segments.push({ type: "text", data: { text: "图生成失败，请稍后重试。" } });
   }
   for (const base64 of imageBase64List) {
     segments.push({ type: "image", data: { file: `base64://${base64}` } });
@@ -526,8 +450,9 @@ async function handleIncomingMessage(ws, event) {
           return await withRetry(() => callApi(ws, "send_msg", grp, timeoutMs), "send_msg-fallback");
         }
       };
-      // 文本（回退为 SVG 保存路径）
-      const fallbackText = svgSavedPath ? `SVG 已保存：${svgSavedPath}` : replyText;
+      // 文本（回退为 PNG/JPG 保存路径）
+      const pathSaved = pngSavedPath || jpgSavedPath;
+      const fallbackText = pathSaved ? `图片已保存：${pathSaved}` : replyText;
       await sendSingle(fallbackText);
       // 逐图
       for (const base64 of imageBase64List) {
