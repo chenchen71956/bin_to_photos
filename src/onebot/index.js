@@ -125,8 +125,13 @@ out.join("") +
 async function renderInfoImageBuffers(data, bin) {
   try {
     let sharpLib = null;
-    try { sharpLib = require("sharp"); } catch {}
-    if (!sharpLib) return { pngBase64: null, jpgBase64: null, pngSavedPath: null, jpgSavedPath: null };
+    try { sharpLib = require("sharp"); } catch (e) {
+      try { console.warn(`[BIN][info] 未加载到 sharp: ${e && e.message ? e.message : e}`); } catch {}
+    }
+    if (!sharpLib) {
+      try { console.warn("[BIN][info] 缺少 sharp，跳过信息图渲染"); } catch {}
+      return { pngBase64: null, jpgBase64: null, pngSavedPath: null, jpgSavedPath: null };
+    }
     const { markup } = buildInfoMarkup(data, bin);
     const density = Math.max(72, Number(process.env.SVG_DENSITY || 192));
     const tmpDir = path.join(__dirname, "..", "..", ".tmp");
@@ -137,16 +142,26 @@ async function renderInfoImageBuffers(data, bin) {
       if (pngBuf && pngBuf.length > 0) {
         pngBase64 = pngBuf.toString("base64");
         try { pngSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.png`); fs.writeFileSync(pngSavedPath, pngBuf); } catch {}
+        try { console.log(`[BIN][info] PNG 渲染成功 size=${pngBuf.length}B density=${density}`); } catch {}
+      } else {
+        try { console.warn("[BIN][info] PNG 渲染得到空缓冲"); } catch {}
       }
-    } catch {}
+    } catch (e1) {
+      try { console.warn(`[BIN][info] PNG 渲染失败: ${e1 && e1.message ? e1.message : e1}`); } catch {}
+    }
     if (!pngBase64) {
       try {
         const jpgBuf = await sharpLib(Buffer.from(markup, "utf8"), { density }).jpeg({ quality: 90 }).toBuffer();
         if (jpgBuf && jpgBuf.length > 0) {
           jpgBase64 = jpgBuf.toString("base64");
           try { jpgSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.jpg`); fs.writeFileSync(jpgSavedPath, jpgBuf); } catch {}
+          try { console.log(`[BIN][info] JPG 渲染成功 size=${jpgBuf.length}B density=${density}`); } catch {}
+        } else {
+          try { console.warn("[BIN][info] JPG 渲染得到空缓冲"); } catch {}
         }
-      } catch {}
+      } catch (e2) {
+        try { console.warn(`[BIN][info] JPG 渲染失败: ${e2 && e2.message ? e2.message : e2}`); } catch {}
+      }
     }
     return { pngBase64, jpgBase64, pngSavedPath, jpgSavedPath };
   } catch {
@@ -396,10 +411,10 @@ async function handleIncomingMessage(ws, event) {
       const r = await renderInfoImageBuffers(remote, bin);
       infoPngBase64 = r.pngBase64; infoJpgBase64 = r.jpgBase64;
       infoPngSavedPath = r.pngSavedPath; infoJpgSavedPath = r.jpgSavedPath;
-      if (infoPngBase64 || infoJpgBase64) {
-        try { console.log(`[BIN] 信息图已渲染: png=${!!infoPngBase64} jpg=${!!infoJpgBase64}`); } catch {}
-      }
-    } catch {}
+      try { console.log(`[BIN] 信息图渲染结果: png=${!!infoPngBase64} jpg=${!!infoJpgBase64} path=${infoPngSavedPath || infoJpgSavedPath || "-"}`); } catch {}
+    } catch (e) {
+      try { console.warn(`[BIN] 信息图渲染异常: ${e && e.message ? e.message : e}`); } catch {}
+    }
 
     const photoUrls = getBinPhotos(bin) || [];
     try { console.log(`[BIN] DB 返回图片链接: ${photoUrls.length}`); } catch {}
