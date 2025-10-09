@@ -51,6 +51,77 @@ function getMessagePlainText(event) {
   return "";
 }
 
+function xmlEscape(s) {
+  const str = String(s == null ? "" : s);
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function renderBinInfoSvg(result, requestedBin) {
+  const empty = "---";
+  const data = (result && typeof result === "object") ? result : {};
+  const v = (key) => {
+    const val = data[key];
+    if (val === undefined || val === null) return empty;
+    if (typeof val === "string" && val.trim() === "") return empty;
+    return String(val);
+  };
+  const valueOr = (value) => {
+    if (value === undefined || value === null) return empty;
+    if (typeof value === "string" && value.trim() === "") return empty;
+    return String(value);
+  };
+
+  const lines = [
+    `BIN：${valueOr(data.bin || requestedBin)}`,
+    `品牌：${v("brand")}`,
+    `類型：${v("type")}`,
+    `卡片等級：${v("category")}`,
+    `發卡行：${v("issuer")}`,
+    `國家：${v("country")}`,
+    `發卡行電話：${v("issuerPhone")}`,
+    `發卡行網址：${v("issuerUrl")}`,
+  ];
+
+  const width = 800;
+  const padding = 28;
+  const titleSize = 28;
+  const lineSize = 20;
+  const lineGap = 10;
+  const titleGap = 16;
+  const totalHeight = padding + titleSize + titleGap + lines.length * (lineSize + lineGap) - lineGap + padding;
+
+  const title = `BIN 資訊`;
+  const fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, "PingFang SC", "Noto Sans CJK SC", "Microsoft Yahei", Arial, sans-serif';
+
+  let y = padding;
+  const x = padding;
+  const svgLines = [];
+  svgLines.push(`<text x="${x}" y="${y + titleSize}" font-size="${titleSize}" font-family="${xmlEscape(fontFamily)}" fill="#111" font-weight="600">${xmlEscape(title)}</text>`);
+  y += titleSize + titleGap;
+  for (const line of lines) {
+    svgLines.push(`<text x="${x}" y="${y + lineSize}" font-size="${lineSize}" font-family="${xmlEscape(fontFamily)}" fill="#222">${xmlEscape(line)}</text>`);
+    y += lineSize + lineGap;
+  }
+
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>\n` +
+`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${totalHeight}" viewBox="0 0 ${width} ${totalHeight}">` +
+`<defs>` +
+`  <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">` +
+`    <stop offset="0%" stop-color="#ffffff"/>` +
+`    <stop offset="100%" stop-color="#f6f7fb"/>` +
+`  </linearGradient>` +
+`</defs>` +
+`<rect x="0" y="0" width="${width}" height="${totalHeight}" fill="url(#bg)"/>` +
+`<g>` + svgLines.join("") + `</g>` +
+`</svg>`;
+  return svg;
+}
+
 async function handleTenCardMosaic(ws, event, mode) {
   try { console.log("[TenCard] 收到十卡图请求"); } catch {}
   const urls = (getAllVotedUrls() || []).slice(0); // 全库
@@ -224,6 +295,33 @@ function callApi(ws, action, params, timeoutMs = 15000) {
 
 async function handleIncomingMessage(ws, event) {
   const rawText = getMessagePlainText(event);
+  // binsvg 命令：渲染 BIN 信息为 SVG，保存到 .tmp，仅返回保存路径
+  const svgMatch = /^\s*binsvg\s+(\d+)\s*$/i.exec(rawText);
+  if (svgMatch) {
+    const bin = svgMatch[1];
+    const url = buildRequestUrl(bin);
+    try {
+      const remote = await httpGetJson(url);
+      const brandRaw = String(remote && remote.brand != null ? remote.brand : "").trim();
+      if (!brandRaw) {
+        console.log(`[BIN][SVG] 品牌为空，不生成、不回复 bin=${bin}`);
+        return;
+      }
+      const svg = renderBinInfoSvg(remote, bin);
+      const tmpDir = path.join(__dirname, "..", "..", ".tmp");
+      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+      const file = path.join(tmpDir, `bin_${bin}_${Date.now()}.svg`);
+      fs.writeFileSync(file, svg, { encoding: "utf8" });
+      const msg = `SVG 已保存：${file}`;
+      const payload = event.message_type === "group"
+        ? { message_type: "group", group_id: event.group_id, message: msg }
+        : { message_type: "private", user_id: event.user_id, message: msg };
+      await callApi(ws, "send_msg", payload, 15000);
+    } catch (e) {
+      console.warn(`[BIN][SVG] 生成失败: ${e && e.message ? e.message : e}`);
+    }
+    return;
+  }
   // 十卡图 / 百卡图 / 万卡图：输出库内所有卡面，近正方形拼接
   if (/^\s*(?:十卡图|10卡图|十卡|十图)\s*$/i.test(rawText)) {
     await handleTenCardMosaic(ws, event, "all");
