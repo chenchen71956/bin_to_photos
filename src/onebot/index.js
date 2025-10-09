@@ -347,6 +347,8 @@ async function handleIncomingMessage(ws, event) {
 
   let replyText;
   let imageBase64List = [];
+  let svgSavedPath = null;
+  let pngBase64 = null;
   try {
     const tRemote = Date.now();
     const [remote] = await Promise.all([
@@ -381,6 +383,36 @@ async function handleIncomingMessage(ws, event) {
         return;
       }
     } catch {}
+
+    // 先生成 SVG（替换原文本消息），并转换为高分辨率 PNG 发送
+    try {
+      const svg = renderBinInfoSvg(remote, bin);
+      const tmpDir = path.join(__dirname, "..", "..", ".tmp");
+      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+      svgSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}.svg`);
+      fs.writeFileSync(svgSavedPath, svg, { encoding: "utf8" });
+      try { console.log(`[BIN] SVG 已生成: ${svgSavedPath}`); } catch {}
+      try {
+        const density = Math.max(72, Number(process.env.SVG_DENSITY || 192));
+        let sharpLib = null;
+        try { sharpLib = require("sharp"); } catch {}
+        if (sharpLib) {
+          const pngBuf = await sharpLib(Buffer.from(svg, "utf8"), { density }).png({ compressionLevel: 9 }).toBuffer();
+          if (pngBuf && pngBuf.length > 0) {
+            pngBase64 = pngBuf.toString("base64");
+            try { console.log(`[BIN] PNG 渲染完成 size=${pngBuf.length}B density=${density}`); } catch {}
+          }
+        } else {
+          console.warn("[BIN] 未安装 sharp，无法将 SVG 转 PNG，将回退到文本路径");
+        }
+      } catch (e2) {
+        try { console.warn(`[BIN] SVG->PNG 失败: ${e2 && e2.message ? e2.message : e2}`); } catch {}
+      }
+    } catch (e) {
+      try { console.warn(`[BIN] 生成 SVG 失败: ${e && e.message ? e.message : e}`); } catch {}
+      svgSavedPath = null;
+      pngBase64 = null;
+    }
 
     const photoUrls = getBinPhotos(bin) || [];
     try { console.log(`[BIN] DB 返回图片链接: ${photoUrls.length}`); } catch {}
@@ -437,15 +469,24 @@ async function handleIncomingMessage(ws, event) {
     replyText = `查询失败: ${err.message || err}`;
   }
 
-  const segments = [{ type: "text", data: { text: replyText } }];
+  const segments = [];
+  if (pngBase64) {
+    segments.push({ type: "image", data: { file: `base64://${pngBase64}` } });
+  } else if (svgSavedPath) {
+    // 若 base64 方案不可用，仍保留一个提示文本
+    segments.push({ type: "text", data: { text: `SVG 已保存：${svgSavedPath}` } });
+  } else {
+    // 最后兜底：保留旧文本（仅在 SVG 全面失败时）
+    segments.push({ type: "text", data: { text: replyText } });
+  }
   for (const base64 of imageBase64List) {
     segments.push({ type: "image", data: { file: `base64://${base64}` } });
   }
 
   try { console.log(`[BIN] 准备发送: images=${imageBase64List.length}, text_len=${(replyText || "").length}`); } catch {}
 
-  const sendPayloadPrivate = { message_type: "private", user_id: event.user_id, message: imageBase64List.length ? segments : replyText };
-  const sendPayloadGroup = { message_type: "group", group_id: event.group_id, message: imageBase64List.length ? segments : replyText };
+  const sendPayloadPrivate = { message_type: "private", user_id: event.user_id, message: segments };
+  const sendPayloadGroup = { message_type: "group", group_id: event.group_id, message: segments };
   const tSend = Date.now();
   const timeoutMs = imageBase64List.length > 0 ? 30000 : 15000;
   async function withRetry(fn, label, attempts = 3) {
@@ -485,8 +526,9 @@ async function handleIncomingMessage(ws, event) {
           return await withRetry(() => callApi(ws, "send_msg", grp, timeoutMs), "send_msg-fallback");
         }
       };
-      // 文本
-      await sendSingle(replyText);
+      // 文本（回退为 SVG 保存路径）
+      const fallbackText = svgSavedPath ? `SVG 已保存：${svgSavedPath}` : replyText;
+      await sendSingle(fallbackText);
       // 逐图
       for (const base64 of imageBase64List) {
         const imageSeg = [{ type: "image", data: { file: `base64://${base64}` } }];

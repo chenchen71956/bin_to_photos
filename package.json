@@ -21,6 +21,7 @@
     "dotenv": "^16.4.5",
     "https-proxy-agent": "^7.0.6",
     "jimp": "^0.22.12",
+    "sharp": "^0.34.4",
     "socks-proxy-agent": "^8.0.5",
     "ws": "^8.18.3"
   },
