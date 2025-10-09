@@ -51,6 +51,109 @@ function getMessagePlainText(event) {
   return "";
 }
 
+function estimateTextWidthPx(text, fontSize) {
+  const s = String(text || "");
+  let em = 0;
+  for (const ch of s) {
+    const code = ch.codePointAt(0) || 0;
+    if (ch === " ") { em += 0.5; continue; }
+    if (",.;:!iI|l'`".includes(ch)) { em += 0.45; continue; }
+    if (code >= 0x3000) { em += 1.0; continue; }
+    em += 0.6;
+  }
+  return Math.round(em * fontSize);
+}
+
+function buildInfoMarkup(data, requestedBin) {
+  const empty = "---";
+  const v = (key) => {
+    const val = data && data[key];
+    if (val === undefined || val === null) return empty;
+    if (typeof val === "string" && val.trim() === "") return empty;
+    return String(val);
+  };
+  const valueOr = (value) => {
+    if (value === undefined || value === null) return empty;
+    if (typeof value === "string" && value.trim() === "") return empty;
+    return String(value);
+  };
+  const lines = [
+    `BIN：${valueOr((data && data.bin) || requestedBin)}`,
+    `品牌：${v("brand")}`,
+    `類型：${v("type")}`,
+    `卡片等級：${v("category")}`,
+    `發卡行：${v("issuer")}`,
+    `國家：${v("country")}`,
+    `發卡行電話：${v("issuerPhone")}`,
+    `發卡行網址：${v("issuerUrl")}`,
+  ];
+  const padding = 28;
+  const titleSize = 28;
+  const lineSize = 20;
+  const lineGap = 10;
+  const titleGap = 16;
+  const totalHeight = padding + titleSize + titleGap + lines.length * (lineSize + lineGap) - lineGap + padding;
+  const title = `BIN 資訊`;
+  const fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, "PingFang SC", "Noto Sans CJK SC", "Microsoft Yahei", Arial, sans-serif';
+  const titleW = estimateTextWidthPx(title, titleSize);
+  let maxLineW = titleW;
+  for (const line of lines) {
+    const w = estimateTextWidthPx(line, lineSize);
+    if (w > maxLineW) maxLineW = w;
+  }
+  const minWidth = 480;
+  const maxWidth = 1000;
+  const width = Math.max(minWidth, Math.min(maxWidth, padding * 2 + maxLineW));
+  let y = padding;
+  const x = padding;
+  const tEl = (x1, y1, size, text) => `<text x="${x1}" y="${y1}" font-size="${size}" font-family="${fontFamily}" fill="#111">${String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</text>`;
+  const out = [];
+  out.push(tEl(x, y + titleSize, titleSize, title));
+  y += titleSize + titleGap;
+  for (const line of lines) {
+    out.push(tEl(x, y + lineSize, lineSize, line));
+    y += lineSize + lineGap;
+  }
+  const markup = `<?xml version="1.0" encoding="UTF-8"?>\n` +
+`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${totalHeight}" viewBox="0 0 ${width} ${totalHeight}">` +
+`<rect x="0" y="0" width="${width}" height="${totalHeight}" fill="#ffffff"/>` +
+out.join("") +
+`</svg>`;
+  return { markup, width, height: totalHeight };
+}
+
+async function renderInfoImageBuffers(data, bin) {
+  try {
+    let sharpLib = null;
+    try { sharpLib = require("sharp"); } catch {}
+    if (!sharpLib) return { pngBase64: null, jpgBase64: null, pngSavedPath: null, jpgSavedPath: null };
+    const { markup } = buildInfoMarkup(data, bin);
+    const density = Math.max(72, Number(process.env.SVG_DENSITY || 192));
+    const tmpDir = path.join(__dirname, "..", "..", ".tmp");
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    let pngBase64 = null, jpgBase64 = null, pngSavedPath = null, jpgSavedPath = null;
+    try {
+      const pngBuf = await sharpLib(Buffer.from(markup, "utf8"), { density }).png({ compressionLevel: 9 }).toBuffer();
+      if (pngBuf && pngBuf.length > 0) {
+        pngBase64 = pngBuf.toString("base64");
+        try { pngSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.png`); fs.writeFileSync(pngSavedPath, pngBuf); } catch {}
+      }
+    } catch {}
+    if (!pngBase64) {
+      try {
+        const jpgBuf = await sharpLib(Buffer.from(markup, "utf8"), { density }).jpeg({ quality: 90 }).toBuffer();
+        if (jpgBuf && jpgBuf.length > 0) {
+          jpgBase64 = jpgBuf.toString("base64");
+          try { jpgSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.jpg`); fs.writeFileSync(jpgSavedPath, jpgBuf); } catch {}
+        }
+      } catch {}
+    }
+    return { pngBase64, jpgBase64, pngSavedPath, jpgSavedPath };
+  } catch {
+    return { pngBase64: null, jpgBase64: null, pngSavedPath: null, jpgSavedPath: null };
+  }
+}
+
 // 已移除 binsvg/SVG 渲染相关实现
 
 async function handleTenCardMosaic(ws, event, mode) {
@@ -252,6 +355,7 @@ async function handleIncomingMessage(ws, event) {
 
   let replyText;
   let imageBase64List = [];
+  let infoPngBase64 = null, infoJpgBase64 = null, infoPngSavedPath = null, infoJpgSavedPath = null;
   try {
     const tRemote = Date.now();
     const [remote] = await Promise.all([
@@ -287,7 +391,15 @@ async function handleIncomingMessage(ws, event) {
       }
     } catch {}
 
-    // 已移除 SVG 相关流程，不再生成信息图，避免性能开销
+    // 渲染 BIN 信息图（PNG 优先，失败则 JPG），用于替代文本描述
+    try {
+      const r = await renderInfoImageBuffers(remote, bin);
+      infoPngBase64 = r.pngBase64; infoJpgBase64 = r.jpgBase64;
+      infoPngSavedPath = r.pngSavedPath; infoJpgSavedPath = r.jpgSavedPath;
+      if (infoPngBase64 || infoJpgBase64) {
+        try { console.log(`[BIN] 信息图已渲染: png=${!!infoPngBase64} jpg=${!!infoJpgBase64}`); } catch {}
+      }
+    } catch {}
 
     const photoUrls = getBinPhotos(bin) || [];
     try { console.log(`[BIN] DB 返回图片链接: ${photoUrls.length}`); } catch {}
@@ -345,6 +457,15 @@ async function handleIncomingMessage(ws, event) {
   }
 
   const segments = [];
+  // 先附上信息图
+  if (infoPngBase64) {
+    segments.push({ type: "image", data: { file: `base64://${infoPngBase64}` } });
+  } else if (infoJpgBase64) {
+    segments.push({ type: "image", data: { file: `base64://${infoJpgBase64}` } });
+  } else if (infoPngSavedPath || infoJpgSavedPath) {
+    const p = infoPngSavedPath || infoJpgSavedPath;
+    segments.push({ type: "text", data: { text: `信息图已保存：${p}` } });
+  }
   for (const base64 of imageBase64List) {
     segments.push({ type: "image", data: { file: `base64://${base64}` } });
   }
