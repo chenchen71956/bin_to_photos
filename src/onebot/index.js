@@ -65,6 +65,13 @@ function estimateTextWidthPx(text, fontSize) {
 }
 
 function buildInfoMarkup(data, requestedBin) {
+  const escText = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const escAttr = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
   const empty = "---";
   const v = (key) => {
     const val = data && data[key];
@@ -106,7 +113,7 @@ function buildInfoMarkup(data, requestedBin) {
   const width = Math.max(minWidth, Math.min(maxWidth, padding * 2 + maxLineW));
   let y = padding;
   const x = padding;
-  const tEl = (x1, y1, size, text) => `<text x="${x1}" y="${y1}" font-size="${size}" font-family="${fontFamily}" fill="#111">${String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</text>`;
+  const tEl = (x1, y1, size, text) => `<text x="${x1}" y="${y1}" font-size="${size}" font-family="${escAttr(fontFamily)}" fill="#111">${escText(text)}</text>`;
   const out = [];
   out.push(tEl(x, y + titleSize, titleSize, title));
   y += titleSize + titleGap;
