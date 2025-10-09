@@ -252,10 +252,6 @@ async function handleIncomingMessage(ws, event) {
 
   let replyText;
   let imageBase64List = [];
-  let pngBase64 = null;
-  let jpgBase64 = null;
-  let pngSavedPath = null;
-  let jpgSavedPath = null;
   try {
     const tRemote = Date.now();
     const [remote] = await Promise.all([
@@ -291,49 +287,7 @@ async function handleIncomingMessage(ws, event) {
       }
     } catch {}
 
-    // 先生成 SVG（内部矢量用于清晰文本），再转换为 PNG（失败则转 JPG）发送
-    try {
-      const svg = renderBinInfoSvg(remote, bin);
-      const tmpDir = path.join(__dirname, "..", "..", ".tmp");
-      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-      // 不再落盘 svg，直接内存渲染，提高整体性能
-      try {
-        const density = Math.max(72, Number(process.env.SVG_DENSITY || 192));
-        let sharpLib = null;
-        try { sharpLib = require("sharp"); } catch {}
-        if (sharpLib) {
-          const pngBuf = await sharpLib(Buffer.from(svg, "utf8"), { density }).png({ compressionLevel: 9 }).toBuffer();
-          if (pngBuf && pngBuf.length > 0) {
-            pngBase64 = pngBuf.toString("base64");
-            // 同步保存 PNG 以便故障排查/回退
-            try {
-              pngSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.png`);
-              fs.writeFileSync(pngSavedPath, pngBuf);
-            } catch {}
-            try { console.log(`[BIN] PNG 渲染完成 size=${pngBuf.length}B density=${density}`); } catch {}
-          }
-          if (!pngBase64) {
-            const jpgBuf = await sharpLib(Buffer.from(svg, "utf8"), { density }).jpeg({ quality: 90 }).toBuffer();
-            if (jpgBuf && jpgBuf.length > 0) {
-              jpgBase64 = jpgBuf.toString("base64");
-              try {
-                jpgSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.jpg`);
-                fs.writeFileSync(jpgSavedPath, jpgBuf);
-              } catch {}
-              try { console.log(`[BIN] JPG 渲染完成 size=${jpgBuf.length}B density=${density}`); } catch {}
-            }
-          }
-        } else {
-          console.warn("[BIN] 未安装 sharp，无法将 SVG 转 PNG/JPG，将回退到文本路径");
-        }
-      } catch (e2) {
-        try { console.warn(`[BIN] SVG->PNG/JPG 失败: ${e2 && e2.message ? e2.message : e2}`); } catch {}
-      }
-    } catch (e) {
-      try { console.warn(`[BIN] 生成 SVG 失败: ${e && e.message ? e.message : e}`); } catch {}
-      pngBase64 = null;
-      jpgBase64 = null;
-    }
+    // 已移除 SVG 相关流程，不再生成信息图，避免性能开销
 
     const photoUrls = getBinPhotos(bin) || [];
     try { console.log(`[BIN] DB 返回图片链接: ${photoUrls.length}`); } catch {}
@@ -391,24 +345,16 @@ async function handleIncomingMessage(ws, event) {
   }
 
   const segments = [];
-  if (pngBase64) {
-    segments.push({ type: "image", data: { file: `base64://${pngBase64}` } });
-  } else if (jpgBase64) {
-    segments.push({ type: "image", data: { file: `base64://${jpgBase64}` } });
-  } else if (pngSavedPath || jpgSavedPath) {
-    // 若图片段不可用，仍保留一个提示文本
-    const p = pngSavedPath || jpgSavedPath;
-    segments.push({ type: "text", data: { text: `图片已保存：${p}` } });
-  } else {
-    // 最后兜底：仅发提示文本（不再发 BIN 纯文本）
-    segments.push({ type: "text", data: { text: "图生成失败，请稍后重试。" } });
-  }
   for (const base64 of imageBase64List) {
     segments.push({ type: "image", data: { file: `base64://${base64}` } });
   }
 
   try { console.log(`[BIN] 准备发送: images=${imageBase64List.length}, text_len=${(replyText || "").length}`); } catch {}
 
+  if (segments.length === 0) {
+    console.log("[BIN] 无卡面图片可发送，静默不回复");
+    return;
+  }
   const sendPayloadPrivate = { message_type: "private", user_id: event.user_id, message: segments };
   const sendPayloadGroup = { message_type: "group", group_id: event.group_id, message: segments };
   const tSend = Date.now();
@@ -450,10 +396,7 @@ async function handleIncomingMessage(ws, event) {
           return await withRetry(() => callApi(ws, "send_msg", grp, timeoutMs), "send_msg-fallback");
         }
       };
-      // 文本（回退为 PNG/JPG 保存路径）
-      const pathSaved = pngSavedPath || jpgSavedPath;
-      const fallbackText = pathSaved ? `图片已保存：${pathSaved}` : replyText;
-      await sendSingle(fallbackText);
+      // 无文本回退，保持静默，仅逐图发送
       // 逐图
       for (const base64 of imageBase64List) {
         const imageSeg = [{ type: "image", data: { file: `base64://${base64}` } }];
