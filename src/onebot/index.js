@@ -101,7 +101,7 @@ function buildInfoMarkup(data, requestedBin, injectedFontCss) {
   const titleGap = 16;
   const totalHeight = padding + titleSize + titleGap + lines.length * (lineSize + lineGap) - lineGap + padding;
   const title = `BIN 資訊`;
-  const fontFamilyFallback = 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, "PingFang SC", "Noto Sans CJK SC", "Microsoft Yahei", Arial, sans-serif';
+  const fontFamilyFallback = 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, "Noto Sans SC", "PingFang SC", "Noto Sans CJK SC", "Microsoft Yahei", Arial, sans-serif';
   const fontFamily = `BinInfoFont, ${fontFamilyFallback}`;
   const titleW = estimateTextWidthPx(title, titleSize);
   let maxLineW = titleW;
@@ -126,6 +126,8 @@ function buildInfoMarkup(data, requestedBin, injectedFontCss) {
   function tryBuildFontFaceCss() {
     try {
       const envPath = process.env.BIN_FONT_FILE && process.env.BIN_FONT_FILE.trim();
+      const remoteUrl = process.env.BIN_FONT_REMOTE && process.env.BIN_FONT_REMOTE.trim(); // 指向 .woff2/.woff/.ttf/.otf 的直链
+      const remoteCss = process.env.BIN_FONT_CSS_REMOTE && process.env.BIN_FONT_CSS_REMOTE.trim(); // 例如 Google Fonts CSS
       const base = path.join(__dirname, "..", "..", "assets", "fonts");
       const candidates = [];
       if (envPath) candidates.push(envPath);
@@ -136,17 +138,30 @@ function buildInfoMarkup(data, requestedBin, injectedFontCss) {
         path.join(base, "NotoSansCJKsc-Regular.otf"),
         path.join(base, "SourceHanSansCN-Regular.otf")
       );
+      // 优先：本地文件 → 远端直链 → 远端 CSS（@import）
       let file = null;
       for (const p of candidates) { if (p && fs.existsSync(p)) { file = p; break; } }
-      if (!file) return "";
-      const buf = fs.readFileSync(file);
-      const ext = (file.split(".").pop() || "").toLowerCase();
-      let mime = "font/woff2", fmt = "woff2";
-      if (ext === "woff") { mime = "font/woff"; fmt = "woff"; }
-      else if (ext === "ttf") { mime = "font/ttf"; fmt = "truetype"; }
-      else if (ext === "otf") { mime = "font/otf"; fmt = "opentype"; }
-      const b64 = buf.toString("base64");
-      return `@font-face{font-family: 'BinInfoFont'; src: url(data:${mime};base64,${b64}) format('${fmt}'); font-weight: normal; font-style: normal; font-display: swap;}`;
+      if (file) {
+        const buf = fs.readFileSync(file);
+        const ext = (file.split(".").pop() || "").toLowerCase();
+        let mime = "font/woff2", fmt = "woff2";
+        if (ext === "woff") { mime = "font/woff"; fmt = "woff"; }
+        else if (ext === "ttf") { mime = "font/ttf"; fmt = "truetype"; }
+        else if (ext === "otf") { mime = "font/otf"; fmt = "opentype"; }
+        const b64 = buf.toString("base64");
+        return `@font-face{font-family:'BinInfoFont';src:url(data:${mime};base64,${b64}) format('${fmt}');font-weight:normal;font-style:normal;font-display:swap;}`;
+      }
+      if (remoteUrl) {
+        const ext = (remoteUrl.split(".").pop() || "").toLowerCase();
+        let fmt = "woff2";
+        if (ext === "woff") fmt = "woff"; else if (ext === "ttf") fmt = "truetype"; else if (ext === "otf") fmt = "opentype";
+        return `@font-face{font-family:'BinInfoFont';src:url(${JSON.stringify(remoteUrl).slice(1,-1)}) format('${fmt}');font-weight:normal;font-style:normal;font-display:swap;}`;
+      }
+      if (remoteCss) {
+        // 使用外部 CSS（如 Google Fonts）
+        return `@import url(${JSON.stringify(remoteCss).slice(1,-1)});`;
+      }
+      return "";
     } catch { return ""; }
   }
   const fontCss = injectedFontCss && injectedFontCss.trim() ? injectedFontCss : tryBuildFontFaceCss();
