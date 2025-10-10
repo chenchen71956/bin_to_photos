@@ -101,7 +101,8 @@ function buildInfoMarkup(data, requestedBin) {
   const titleGap = 16;
   const totalHeight = padding + titleSize + titleGap + lines.length * (lineSize + lineGap) - lineGap + padding;
   const title = `BIN 資訊`;
-  const fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, "PingFang SC", "Noto Sans CJK SC", "Microsoft Yahei", Arial, sans-serif';
+  const fontFamilyFallback = 'system-ui, -apple-system, Segoe UI, Roboto, Helvetica, "PingFang SC", "Noto Sans CJK SC", "Microsoft Yahei", Arial, sans-serif';
+  const fontFamily = `BinInfoFont, ${fontFamilyFallback}`;
   const titleW = estimateTextWidthPx(title, titleSize);
   let maxLineW = titleW;
   for (const line of lines) {
@@ -121,8 +122,38 @@ function buildInfoMarkup(data, requestedBin) {
     out.push(tEl(x, y + lineSize, lineSize, line));
     y += lineSize + lineGap;
   }
+  // 尝试内嵌字体，避免服务器无中文字体导致的方框乱码
+  function tryBuildFontFaceCss() {
+    try {
+      const envPath = process.env.BIN_FONT_FILE && process.env.BIN_FONT_FILE.trim();
+      const base = path.join(__dirname, "..", "..", "assets", "fonts");
+      const candidates = [];
+      if (envPath) candidates.push(envPath);
+      candidates.push(
+        path.join(base, "NotoSansSC-Regular.woff2"),
+        path.join(base, "NotoSansSC-Regular.woff"),
+        path.join(base, "NotoSansSC-Regular.ttf"),
+        path.join(base, "NotoSansCJKsc-Regular.otf"),
+        path.join(base, "SourceHanSansCN-Regular.otf")
+      );
+      let file = null;
+      for (const p of candidates) { if (p && fs.existsSync(p)) { file = p; break; } }
+      if (!file) return "";
+      const buf = fs.readFileSync(file);
+      const ext = (file.split(".").pop() || "").toLowerCase();
+      let mime = "font/woff2", fmt = "woff2";
+      if (ext === "woff") { mime = "font/woff"; fmt = "woff"; }
+      else if (ext === "ttf") { mime = "font/ttf"; fmt = "truetype"; }
+      else if (ext === "otf") { mime = "font/otf"; fmt = "opentype"; }
+      const b64 = buf.toString("base64");
+      return `@font-face{font-family: 'BinInfoFont'; src: url(data:${mime};base64,${b64}) format('${fmt}'); font-weight: normal; font-style: normal; font-display: swap;}`;
+    } catch { return ""; }
+  }
+  const fontCss = tryBuildFontFaceCss();
+  const styleBlock = fontCss ? `<defs><style type="text/css"><![CDATA[ ${fontCss} ]]></style></defs>` : "";
   const markup = `<?xml version="1.0" encoding="UTF-8"?>\n` +
 `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${totalHeight}" viewBox="0 0 ${width} ${totalHeight}">` +
+styleBlock +
 `<rect x="0" y="0" width="${width}" height="${totalHeight}" fill="#ffffff"/>` +
 out.join("") +
 `</svg>`;
