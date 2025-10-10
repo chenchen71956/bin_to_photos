@@ -171,9 +171,7 @@ async function renderInfoImageBuffers(data, bin) {
     }
     const { markup, width, height } = buildInfoMarkup(data, bin);
     const density = Math.max(72, Number(process.env.SVG_DENSITY || 192));
-    const tmpDir = path.join(__dirname, "..", "..", ".tmp");
-    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-    let pngBase64 = null, jpgBase64 = null, pngSavedPath = null, jpgSavedPath = null;
+    let pngBase64 = null, jpgBase64 = null;
     try {
       // 先渲染纯文本底图 PNG
       let basePng = await sharpLib(Buffer.from(markup, "utf8"), { density }).png({ compressionLevel: 9 }).toBuffer();
@@ -226,7 +224,6 @@ async function renderInfoImageBuffers(data, bin) {
       }
       if (basePng && basePng.length > 0) {
         pngBase64 = basePng.toString("base64");
-        try { pngSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.png`); fs.writeFileSync(pngSavedPath, basePng); } catch {}
         try { console.log(`[BIN][info] PNG 渲染成功 size=${basePng.length}B density=${density}`); } catch {}
       } else {
         try { console.warn("[BIN][info] PNG 渲染得到空缓冲"); } catch {}
@@ -285,7 +282,6 @@ async function renderInfoImageBuffers(data, bin) {
         }
         if (baseJpg && baseJpg.length > 0) {
           jpgBase64 = baseJpg.toString("base64");
-          try { jpgSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.jpg`); fs.writeFileSync(jpgSavedPath, baseJpg); } catch {}
           try { console.log(`[BIN][info] JPG 渲染成功 size=${baseJpg.length}B density=${density}`); } catch {}
         } else {
           try { console.warn("[BIN][info] JPG 渲染得到空缓冲"); } catch {}
@@ -294,9 +290,9 @@ async function renderInfoImageBuffers(data, bin) {
         try { console.warn(`[BIN][info] JPG 渲染失败: ${e2 && e2.message ? e2.message : e2}`); } catch {}
       }
     }
-    return { pngBase64, jpgBase64, pngSavedPath, jpgSavedPath };
+    return { pngBase64, jpgBase64 };
   } catch {
-    return { pngBase64: null, jpgBase64: null, pngSavedPath: null, jpgSavedPath: null };
+    return { pngBase64: null, jpgBase64: null };
   }
 }
 
@@ -503,7 +499,7 @@ async function handleIncomingMessage(ws, event) {
 
   let replyText;
   let imageBase64List = [];
-  let infoPngBase64 = null, infoJpgBase64 = null, infoPngSavedPath = null, infoJpgSavedPath = null;
+  let infoPngBase64 = null, infoJpgBase64 = null;
   try {
     const tRemote = Date.now();
     const [remote] = await Promise.all([
@@ -543,8 +539,7 @@ async function handleIncomingMessage(ws, event) {
     try {
       const r = await renderInfoImageBuffers(remote, bin);
       infoPngBase64 = r.pngBase64; infoJpgBase64 = r.jpgBase64;
-      infoPngSavedPath = r.pngSavedPath; infoJpgSavedPath = r.jpgSavedPath;
-      try { console.log(`[BIN] 信息图渲染结果: png=${!!infoPngBase64} jpg=${!!infoJpgBase64} path=${infoPngSavedPath || infoJpgSavedPath || "-"}`); } catch {}
+      try { console.log(`[BIN] 信息图渲染结果: png=${!!infoPngBase64} jpg=${!!infoJpgBase64}`); } catch {}
     } catch (e) {
       try { console.warn(`[BIN] 信息图渲染异常: ${e && e.message ? e.message : e}`); } catch {}
     }
@@ -610,9 +605,6 @@ async function handleIncomingMessage(ws, event) {
     segments.push({ type: "image", data: { file: `base64://${infoPngBase64}` } });
   } else if (infoJpgBase64) {
     segments.push({ type: "image", data: { file: `base64://${infoJpgBase64}` } });
-  } else if (infoPngSavedPath || infoJpgSavedPath) {
-    const p = infoPngSavedPath || infoJpgSavedPath;
-    segments.push({ type: "text", data: { text: `信息图已保存：${p}` } });
   }
   for (const base64 of imageBase64List) {
     segments.push({ type: "image", data: { file: `base64://${base64}` } });
