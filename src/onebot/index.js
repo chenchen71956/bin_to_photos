@@ -129,6 +129,30 @@ out.join("") +
   return { markup, width, height: totalHeight };
 }
 
+function pickBrandAsset(brandRaw) {
+  try {
+    const s = String(brandRaw || "").toUpperCase().replace(/\s+/g, "");
+    const base = path.join(__dirname, "..", "..", "assets");
+    if (!s) return null;
+    if (s.includes("UNIONPAY") || s.includes("CHINAUNIONPAY") || s.includes("CUP") || s.includes("CHINAUNIONPAY")) {
+      return path.join(base, "unionpay.svg");
+    }
+    if (s.includes("VISA")) {
+      return path.join(base, "visa.svg");
+    }
+    if (s.includes("MASTERCARD") || s.includes("MASTERCard")) {
+      return path.join(base, "mastercard.svg");
+    }
+    if (s.includes("JCB")) {
+      return path.join(base, "jcb.svg");
+    }
+    if (s.includes("AMERICANEXPRESS") || s.includes("AMEX")) {
+      return path.join(base, "american_express.svg");
+    }
+  } catch {}
+  return null;
+}
+
 async function renderInfoImageBuffers(data, bin) {
   try {
     let sharpLib = null;
@@ -139,17 +163,37 @@ async function renderInfoImageBuffers(data, bin) {
       try { console.warn("[BIN][info] 缺少 sharp，跳过信息图渲染"); } catch {}
       return { pngBase64: null, jpgBase64: null, pngSavedPath: null, jpgSavedPath: null };
     }
-    const { markup } = buildInfoMarkup(data, bin);
+    const { markup, width, height } = buildInfoMarkup(data, bin);
     const density = Math.max(72, Number(process.env.SVG_DENSITY || 192));
     const tmpDir = path.join(__dirname, "..", "..", ".tmp");
     if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
     let pngBase64 = null, jpgBase64 = null, pngSavedPath = null, jpgSavedPath = null;
     try {
-      const pngBuf = await sharpLib(Buffer.from(markup, "utf8"), { density }).png({ compressionLevel: 9 }).toBuffer();
-      if (pngBuf && pngBuf.length > 0) {
-        pngBase64 = pngBuf.toString("base64");
-        try { pngSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.png`); fs.writeFileSync(pngSavedPath, pngBuf); } catch {}
-        try { console.log(`[BIN][info] PNG 渲染成功 size=${pngBuf.length}B density=${density}`); } catch {}
+      // 先渲染纯文本底图 PNG
+      let basePng = await sharpLib(Buffer.from(markup, "utf8"), { density }).png({ compressionLevel: 9 }).toBuffer();
+      // 叠加品牌水印（如有）
+      try {
+        const brandAsset = pickBrandAsset(data && data.brand);
+        if (brandAsset && fs.existsSync(brandAsset)) {
+          const baseMeta = await sharpLib(basePng).metadata();
+          const canvasW = baseMeta.width || width || 800;
+          const canvasH = baseMeta.height || height || 400;
+          const svgBuf = fs.readFileSync(brandAsset);
+          // 将 SVG 渲染为透明 PNG，并按宽度 60% 进行缩放
+          const logoPng = await sharpLib(svgBuf, { density }).resize(Math.max(1, Math.round(canvasW * 0.6))).png().toBuffer();
+          const logoMeta = await sharpLib(logoPng).metadata();
+          const overlay = await sharpLib(logoPng).ensureAlpha().modulate({ opacity: 0.08 }).toBuffer();
+          const left = Math.max(0, Math.round(((canvasW) - (logoMeta.width || 0)) / 2));
+          const top = Math.max(0, Math.round(((canvasH) - (logoMeta.height || 0)) / 2));
+          basePng = await sharpLib(basePng).composite([{ input: overlay, left, top }]).png().toBuffer();
+        }
+      } catch (eW) {
+        try { console.warn(`[BIN][info] 品牌水印叠加失败: ${eW && eW.message ? eW.message : eW}`); } catch {}
+      }
+      if (basePng && basePng.length > 0) {
+        pngBase64 = basePng.toString("base64");
+        try { pngSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.png`); fs.writeFileSync(pngSavedPath, basePng); } catch {}
+        try { console.log(`[BIN][info] PNG 渲染成功 size=${basePng.length}B density=${density}`); } catch {}
       } else {
         try { console.warn("[BIN][info] PNG 渲染得到空缓冲"); } catch {}
       }
@@ -158,11 +202,29 @@ async function renderInfoImageBuffers(data, bin) {
     }
     if (!pngBase64) {
       try {
-        const jpgBuf = await sharpLib(Buffer.from(markup, "utf8"), { density }).jpeg({ quality: 90 }).toBuffer();
-        if (jpgBuf && jpgBuf.length > 0) {
-          jpgBase64 = jpgBuf.toString("base64");
-          try { jpgSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.jpg`); fs.writeFileSync(jpgSavedPath, jpgBuf); } catch {}
-          try { console.log(`[BIN][info] JPG 渲染成功 size=${jpgBuf.length}B density=${density}`); } catch {}
+        // 同样流程：生成 JPG，并叠加品牌水印
+        let baseJpg = await sharpLib(Buffer.from(markup, "utf8"), { density }).jpeg({ quality: 90 }).toBuffer();
+        try {
+          const brandAsset = pickBrandAsset(data && data.brand);
+          if (brandAsset && fs.existsSync(brandAsset)) {
+            const baseMeta = await sharpLib(baseJpg).metadata();
+            const canvasW = baseMeta.width || width || 800;
+            const canvasH = baseMeta.height || height || 400;
+            const svgBuf = fs.readFileSync(brandAsset);
+            const logoPng = await sharpLib(svgBuf, { density }).resize(Math.max(1, Math.round(canvasW * 0.6))).png().toBuffer();
+            const logoMeta = await sharpLib(logoPng).metadata();
+            const overlay = await sharpLib(logoPng).ensureAlpha().modulate({ opacity: 0.08 }).toBuffer();
+            const left = Math.max(0, Math.round(((canvasW) - (logoMeta.width || 0)) / 2));
+            const top = Math.max(0, Math.round(((canvasH) - (logoMeta.height || 0)) / 2));
+            baseJpg = await sharpLib(baseJpg).composite([{ input: overlay, left, top }]).jpeg({ quality: 90 }).toBuffer();
+          }
+        } catch (eW2) {
+          try { console.warn(`[BIN][info] 品牌水印叠加失败(JPG): ${eW2 && eW2.message ? eW2.message : eW2}`); } catch {}
+        }
+        if (baseJpg && baseJpg.length > 0) {
+          jpgBase64 = baseJpg.toString("base64");
+          try { jpgSavedPath = path.join(tmpDir, `bin_${bin}_${Date.now()}_info.jpg`); fs.writeFileSync(jpgSavedPath, baseJpg); } catch {}
+          try { console.log(`[BIN][info] JPG 渲染成功 size=${baseJpg.length}B density=${density}`); } catch {}
         } else {
           try { console.warn("[BIN][info] JPG 渲染得到空缓冲"); } catch {}
         }
