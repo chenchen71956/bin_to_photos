@@ -186,9 +186,12 @@ async function renderInfoImageBuffers(data, bin) {
           const canvasH = baseMeta.height || height || 400;
           const logoOpacity = Math.max(0, Math.min(1, Number(process.env.BIN_LOGO_OPACITY || 0.30)));
           const n = brandAssets.length;
-          const ratio = Math.max(0.25, Math.min(0.6, 0.6 - (n - 1) * 0.1));
-          const gap = Math.max(8, Math.round(canvasH * 0.02));
+          const gap = Math.max(8, Math.round(canvasW * 0.02));
           const prepared = [];
+          // 先渲染为按目标宽度的图，再统一按高度上限进行二次缩放
+          const availableW = Math.max(1, Math.round(canvasW * 0.9));
+          const eachW = Math.max(1, Math.floor((availableW - gap * (n - 1)) / n));
+          const maxH = Math.max(1, Math.round(canvasH * 0.45));
           for (const asset of brandAssets) {
             let svgRaw;
             try { svgRaw = fs.readFileSync(asset, "utf8"); } catch { svgRaw = fs.readFileSync(asset).toString("utf8"); }
@@ -197,18 +200,24 @@ async function renderInfoImageBuffers(data, bin) {
               const opStr = logoOpacity.toFixed(2);
               svgWithOpacity = svgWithOpacity.replace(/<svg\b([^>]*)>/i, `<svg $1 opacity="${opStr}">`);
             }
-            const logoW = Math.max(1, Math.round(canvasW * ratio));
-            const buf = await sharpLib(Buffer.from(svgWithOpacity, "utf8"), { density }).resize(logoW).png().toBuffer();
-            const meta = await sharpLib(buf).metadata();
-            prepared.push({ buf, w: meta.width || logoW, h: meta.height || Math.round(logoW * 0.6) });
+            let buf = await sharpLib(Buffer.from(svgWithOpacity, "utf8"), { density }).resize(eachW).png().toBuffer();
+            let meta = await sharpLib(buf).metadata();
+            if ((meta.height || 0) > maxH) {
+              const scale = maxH / (meta.height || maxH);
+              const newW = Math.max(1, Math.round((meta.width || eachW) * scale));
+              buf = await sharpLib(buf).resize(newW, maxH).png().toBuffer();
+              meta = await sharpLib(buf).metadata();
+            }
+            prepared.push({ buf, w: meta.width || eachW, h: meta.height || maxH });
           }
-          const totalH = prepared.reduce((s, it) => s + it.h, 0) + (prepared.length - 1) * gap;
-          let y = Math.max(0, Math.round((canvasH - totalH) / 2));
+          const rowW = prepared.reduce((s, it) => s + it.w, 0) + (prepared.length - 1) * gap;
+          let x = Math.max(0, Math.round((canvasW - rowW) / 2));
+          const rowH = Math.max(...prepared.map(it => it.h));
+          const y = Math.max(0, Math.round((canvasH - rowH) / 2));
           const composites = [];
           for (const it of prepared) {
-            const left = Math.max(0, Math.round((canvasW - it.w) / 2));
-            composites.push({ input: it.buf, left, top: y, blend: 'over' });
-            y += it.h + gap;
+            composites.push({ input: it.buf, left: x, top: y, blend: 'over' });
+            x += it.w + gap;
           }
           basePng = await sharpLib(basePng).composite(composites).png().toBuffer();
         }
@@ -237,9 +246,11 @@ async function renderInfoImageBuffers(data, bin) {
             const canvasH = baseMeta.height || height || 400;
             const logoOpacity = Math.max(0, Math.min(1, Number(process.env.BIN_LOGO_OPACITY || 0.30)));
             const n = brandAssets.length;
-            const ratio = Math.max(0.25, Math.min(0.6, 0.6 - (n - 1) * 0.1));
-            const gap = Math.max(8, Math.round(canvasH * 0.02));
+            const gap = Math.max(8, Math.round(canvasW * 0.02));
             const prepared = [];
+            const availableW = Math.max(1, Math.round(canvasW * 0.9));
+            const eachW = Math.max(1, Math.floor((availableW - gap * (n - 1)) / n));
+            const maxH = Math.max(1, Math.round(canvasH * 0.45));
             for (const asset of brandAssets) {
               let svgRaw;
               try { svgRaw = fs.readFileSync(asset, "utf8"); } catch { svgRaw = fs.readFileSync(asset).toString("utf8"); }
@@ -248,18 +259,24 @@ async function renderInfoImageBuffers(data, bin) {
                 const opStr = logoOpacity.toFixed(2);
                 svgWithOpacity = svgWithOpacity.replace(/<svg\b([^>]*)>/i, `<svg $1 opacity=\"${opStr}\">`);
               }
-              const logoW = Math.max(1, Math.round(canvasW * ratio));
-              const buf = await sharpLib(Buffer.from(svgWithOpacity, "utf8"), { density }).resize(logoW).png().toBuffer();
-              const meta = await sharpLib(buf).metadata();
-              prepared.push({ buf, w: meta.width || logoW, h: meta.height || Math.round(logoW * 0.6) });
+              let buf = await sharpLib(Buffer.from(svgWithOpacity, "utf8"), { density }).resize(eachW).png().toBuffer();
+              let meta = await sharpLib(buf).metadata();
+              if ((meta.height || 0) > maxH) {
+                const scale = maxH / (meta.height || maxH);
+                const newW = Math.max(1, Math.round((meta.width || eachW) * scale));
+                buf = await sharpLib(buf).resize(newW, maxH).png().toBuffer();
+                meta = await sharpLib(buf).metadata();
+              }
+              prepared.push({ buf, w: meta.width || eachW, h: meta.height || maxH });
             }
-            const totalH = prepared.reduce((s, it) => s + it.h, 0) + (prepared.length - 1) * gap;
-            let y = Math.max(0, Math.round((canvasH - totalH) / 2));
+            const rowW = prepared.reduce((s, it) => s + it.w, 0) + (prepared.length - 1) * gap;
+            let x = Math.max(0, Math.round((canvasW - rowW) / 2));
+            const rowH = Math.max(...prepared.map(it => it.h));
+            const y = Math.max(0, Math.round((canvasH - rowH) / 2));
             const composites = [];
             for (const it of prepared) {
-              const left = Math.max(0, Math.round((canvasW - it.w) / 2));
-              composites.push({ input: it.buf, left, top: y, blend: 'over' });
-              y += it.h + gap;
+              composites.push({ input: it.buf, left: x, top: y, blend: 'over' });
+              x += it.w + gap;
             }
             baseJpg = await sharpLib(baseJpg).composite(composites).jpeg({ quality: 90 }).toBuffer();
           }
