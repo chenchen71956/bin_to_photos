@@ -49,7 +49,7 @@ async function notifyNewBinInserted(bin, pickedUrls) {
     `類型：${v("type")}`,
     `卡片等級：${v("category")}`,
     `發卡行：${v("issuer")}`,
-    `國家：${v("country")}`,
+    `區域：${v("country")}`,
     `發卡行電話：${v("issuerPhone")}`,
     `發卡行網址：${v("issuerUrl")}`,
   ];

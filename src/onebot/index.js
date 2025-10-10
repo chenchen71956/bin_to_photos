@@ -90,7 +90,7 @@ function buildInfoMarkup(data, requestedBin) {
     `類型：${v("type")}`,
     `卡片等級：${v("category")}`,
     `發卡行：${v("issuer")}`,
-    `國家：${v("country")}`,
+    `區域：${v("country")}`,
     `發卡行電話：${v("issuerPhone")}`,
     `發卡行網址：${v("issuerUrl")}`,
   ];
@@ -129,28 +129,34 @@ out.join("") +
   return { markup, width, height: totalHeight };
 }
 
-function pickBrandAsset(brandRaw) {
+function pickBrandAssets(brandRaw) {
   try {
-    const s = String(brandRaw || "").toUpperCase().replace(/\s+/g, "");
+    const text = String(brandRaw || "").toUpperCase();
     const base = path.join(__dirname, "..", "..", "assets");
-    if (!s) return null;
-    if (s.includes("UNIONPAY") || s.includes("CHINAUNIONPAY") || s.includes("CUP") || s.includes("CHINAUNIONPAY")) {
-      return path.join(base, "unionpay.svg");
+    if (!text.trim()) return [];
+    const defs = [
+      { file: "unionpay.svg", keys: ["CHINA UNION PAY", "UNIONPAY", "CUP", "CHINAUNIONPAY"] },
+      { file: "visa.svg", keys: ["VISA"] },
+      { file: "mastercard.svg", keys: ["MASTERCARD", "MASTER CARD"] },
+      { file: "jcb.svg", keys: ["JCB"] },
+      { file: "american_express.svg", keys: ["AMERICAN EXPRESS", "AMEX"] },
+    ];
+    const hits = [];
+    for (const d of defs) {
+      let idx = -1;
+      for (const k of d.keys) {
+        const i = text.indexOf(k);
+        if (i >= 0 && (idx < 0 || i < idx)) idx = i;
+      }
+      if (idx >= 0) hits.push({ idx, path: path.join(base, d.file) });
     }
-    if (s.includes("VISA")) {
-      return path.join(base, "visa.svg");
-    }
-    if (s.includes("MASTERCARD") || s.includes("MASTERCard")) {
-      return path.join(base, "mastercard.svg");
-    }
-    if (s.includes("JCB")) {
-      return path.join(base, "jcb.svg");
-    }
-    if (s.includes("AMERICANEXPRESS") || s.includes("AMEX")) {
-      return path.join(base, "american_express.svg");
-    }
+    hits.sort((a, b) => a.idx - b.idx);
+    const out = [];
+    const seen = new Set();
+    for (const h of hits) { if (!seen.has(h.path)) { out.push(h.path); seen.add(h.path); } }
+    return out;
   } catch {}
-  return null;
+  return [];
 }
 
 async function renderInfoImageBuffers(data, bin) {
@@ -173,26 +179,38 @@ async function renderInfoImageBuffers(data, bin) {
       let basePng = await sharpLib(Buffer.from(markup, "utf8"), { density }).png({ compressionLevel: 9 }).toBuffer();
       // 叠加品牌水印（如有）
       try {
-        const brandAsset = pickBrandAsset(data && data.brand);
-        if (brandAsset && fs.existsSync(brandAsset)) {
+        const brandAssets = pickBrandAssets(data && data.brand);
+        if (Array.isArray(brandAssets) && brandAssets.length > 0) {
           const baseMeta = await sharpLib(basePng).metadata();
           const canvasW = baseMeta.width || width || 800;
           const canvasH = baseMeta.height || height || 400;
-          // 读取 SVG 文本，直接在根 <svg> 注入 opacity 以保证透明度生效（避免某些环境下 composite.opacity 不生效）
-          let svgRaw;
-          try { svgRaw = fs.readFileSync(brandAsset, "utf8"); } catch { svgRaw = fs.readFileSync(brandAsset).toString("utf8"); }
-          let svgWithOpacity = svgRaw;
-          if (!/\bopacity\s*=/.test(svgWithOpacity)) {
-            svgWithOpacity = svgWithOpacity.replace(/<svg\b([^>]*)>/i, '<svg $1 opacity="0.08">');
+          const logoOpacity = Math.max(0, Math.min(1, Number(process.env.BIN_LOGO_OPACITY || 0.30)));
+          const n = brandAssets.length;
+          const ratio = Math.max(0.25, Math.min(0.6, 0.6 - (n - 1) * 0.1));
+          const gap = Math.max(8, Math.round(canvasH * 0.02));
+          const prepared = [];
+          for (const asset of brandAssets) {
+            let svgRaw;
+            try { svgRaw = fs.readFileSync(asset, "utf8"); } catch { svgRaw = fs.readFileSync(asset).toString("utf8"); }
+            let svgWithOpacity = svgRaw;
+            if (!/\bopacity\s*=/.test(svgWithOpacity)) {
+              const opStr = logoOpacity.toFixed(2);
+              svgWithOpacity = svgWithOpacity.replace(/<svg\b([^>]*)>/i, `<svg $1 opacity="${opStr}">`);
+            }
+            const logoW = Math.max(1, Math.round(canvasW * ratio));
+            const buf = await sharpLib(Buffer.from(svgWithOpacity, "utf8"), { density }).resize(logoW).png().toBuffer();
+            const meta = await sharpLib(buf).metadata();
+            prepared.push({ buf, w: meta.width || logoW, h: meta.height || Math.round(logoW * 0.6) });
           }
-          const logoPng = await sharpLib(Buffer.from(svgWithOpacity, "utf8"), { density })
-            .resize(Math.max(1, Math.round(canvasW * 0.6)))
-            .png()
-            .toBuffer();
-          const logoMeta = await sharpLib(logoPng).metadata();
-          const left = Math.max(0, Math.round(((canvasW) - (logoMeta.width || 0)) / 2));
-          const top = Math.max(0, Math.round(((canvasH) - (logoMeta.height || 0)) / 2));
-          basePng = await sharpLib(basePng).composite([{ input: logoPng, left, top, blend: 'over' }]).png().toBuffer();
+          const totalH = prepared.reduce((s, it) => s + it.h, 0) + (prepared.length - 1) * gap;
+          let y = Math.max(0, Math.round((canvasH - totalH) / 2));
+          const composites = [];
+          for (const it of prepared) {
+            const left = Math.max(0, Math.round((canvasW - it.w) / 2));
+            composites.push({ input: it.buf, left, top: y, blend: 'over' });
+            y += it.h + gap;
+          }
+          basePng = await sharpLib(basePng).composite(composites).png().toBuffer();
         }
       } catch (eW) {
         try { console.warn(`[BIN][info] 品牌水印叠加失败: ${eW && eW.message ? eW.message : eW}`); } catch {}
@@ -212,25 +230,38 @@ async function renderInfoImageBuffers(data, bin) {
         // 同样流程：生成 JPG，并叠加品牌水印
         let baseJpg = await sharpLib(Buffer.from(markup, "utf8"), { density }).jpeg({ quality: 90 }).toBuffer();
         try {
-          const brandAsset = pickBrandAsset(data && data.brand);
-          if (brandAsset && fs.existsSync(brandAsset)) {
+          const brandAssets = pickBrandAssets(data && data.brand);
+          if (Array.isArray(brandAssets) && brandAssets.length > 0) {
             const baseMeta = await sharpLib(baseJpg).metadata();
             const canvasW = baseMeta.width || width || 800;
             const canvasH = baseMeta.height || height || 400;
-            let svgRaw2;
-            try { svgRaw2 = fs.readFileSync(brandAsset, "utf8"); } catch { svgRaw2 = fs.readFileSync(brandAsset).toString("utf8"); }
-            let svgWithOpacity2 = svgRaw2;
-            if (!/\bopacity\s*=/.test(svgWithOpacity2)) {
-              svgWithOpacity2 = svgWithOpacity2.replace(/<svg\b([^>]*)>/i, '<svg $1 opacity="0.08">');
+            const logoOpacity = Math.max(0, Math.min(1, Number(process.env.BIN_LOGO_OPACITY || 0.30)));
+            const n = brandAssets.length;
+            const ratio = Math.max(0.25, Math.min(0.6, 0.6 - (n - 1) * 0.1));
+            const gap = Math.max(8, Math.round(canvasH * 0.02));
+            const prepared = [];
+            for (const asset of brandAssets) {
+              let svgRaw;
+              try { svgRaw = fs.readFileSync(asset, "utf8"); } catch { svgRaw = fs.readFileSync(asset).toString("utf8"); }
+              let svgWithOpacity = svgRaw;
+              if (!/\bopacity\s*=/.test(svgWithOpacity)) {
+                const opStr = logoOpacity.toFixed(2);
+                svgWithOpacity = svgWithOpacity.replace(/<svg\b([^>]*)>/i, `<svg $1 opacity=\"${opStr}\">`);
+              }
+              const logoW = Math.max(1, Math.round(canvasW * ratio));
+              const buf = await sharpLib(Buffer.from(svgWithOpacity, "utf8"), { density }).resize(logoW).png().toBuffer();
+              const meta = await sharpLib(buf).metadata();
+              prepared.push({ buf, w: meta.width || logoW, h: meta.height || Math.round(logoW * 0.6) });
             }
-            const logoPng = await sharpLib(Buffer.from(svgWithOpacity2, "utf8"), { density })
-              .resize(Math.max(1, Math.round(canvasW * 0.6)))
-              .png()
-              .toBuffer();
-            const logoMeta = await sharpLib(logoPng).metadata();
-            const left = Math.max(0, Math.round(((canvasW) - (logoMeta.width || 0)) / 2));
-            const top = Math.max(0, Math.round(((canvasH) - (logoMeta.height || 0)) / 2));
-            baseJpg = await sharpLib(baseJpg).composite([{ input: logoPng, left, top, blend: 'over' }]).jpeg({ quality: 90 }).toBuffer();
+            const totalH = prepared.reduce((s, it) => s + it.h, 0) + (prepared.length - 1) * gap;
+            let y = Math.max(0, Math.round((canvasH - totalH) / 2));
+            const composites = [];
+            for (const it of prepared) {
+              const left = Math.max(0, Math.round((canvasW - it.w) / 2));
+              composites.push({ input: it.buf, left, top: y, blend: 'over' });
+              y += it.h + gap;
+            }
+            baseJpg = await sharpLib(baseJpg).composite(composites).jpeg({ quality: 90 }).toBuffer();
           }
         } catch (eW2) {
           try { console.warn(`[BIN][info] 品牌水印叠加失败(JPG): ${eW2 && eW2.message ? eW2.message : eW2}`); } catch {}
@@ -652,7 +683,7 @@ function formatBinReply(result, requestedBin) {
     `類型：${v("type")}`,
     `卡片等級：${v("category")}`,
     `發卡行：${v("issuer")}`,
-    `國家：${v("country")}`,
+    `區域：${v("country")}`,
     `發卡行電話：${v("issuerPhone")}`,
     `發卡行網址：${v("issuerUrl")}`,
   ];
@@ -691,7 +722,7 @@ async function notifyNewBinInserted(bin, pickedUrls) {
     `類型：${v("type")}`,
     `卡片等級：${v("category")}`,
     `發卡行：${v("issuer")}`,
-    `國家：${v("country")}`,
+    `區域：${v("country")}`,
     `發卡行電話：${v("issuerPhone")}`,
     `發卡行網址：${v("issuerUrl")}`,
   ];
