@@ -179,13 +179,12 @@ async function renderInfoImageBuffers(data, bin) {
           const canvasW = baseMeta.width || width || 800;
           const canvasH = baseMeta.height || height || 400;
           const svgBuf = fs.readFileSync(brandAsset);
-          // 将 SVG 渲染为透明 PNG，并按宽度 60% 进行缩放
+          // 将 SVG 渲染为 PNG，并按宽度 60% 进行缩放；使用 composite 的 opacity 控制叠加透明度
           const logoPng = await sharpLib(svgBuf, { density }).resize(Math.max(1, Math.round(canvasW * 0.6))).png().toBuffer();
           const logoMeta = await sharpLib(logoPng).metadata();
-          const overlay = await sharpLib(logoPng).ensureAlpha().modulate({ opacity: 0.08 }).toBuffer();
           const left = Math.max(0, Math.round(((canvasW) - (logoMeta.width || 0)) / 2));
           const top = Math.max(0, Math.round(((canvasH) - (logoMeta.height || 0)) / 2));
-          basePng = await sharpLib(basePng).composite([{ input: overlay, left, top }]).png().toBuffer();
+          basePng = await sharpLib(basePng).composite([{ input: logoPng, left, top, opacity: 0.12 }]).png().toBuffer();
         }
       } catch (eW) {
         try { console.warn(`[BIN][info] 品牌水印叠加失败: ${eW && eW.message ? eW.message : eW}`); } catch {}
@@ -213,10 +212,9 @@ async function renderInfoImageBuffers(data, bin) {
             const svgBuf = fs.readFileSync(brandAsset);
             const logoPng = await sharpLib(svgBuf, { density }).resize(Math.max(1, Math.round(canvasW * 0.6))).png().toBuffer();
             const logoMeta = await sharpLib(logoPng).metadata();
-            const overlay = await sharpLib(logoPng).ensureAlpha().modulate({ opacity: 0.08 }).toBuffer();
             const left = Math.max(0, Math.round(((canvasW) - (logoMeta.width || 0)) / 2));
             const top = Math.max(0, Math.round(((canvasH) - (logoMeta.height || 0)) / 2));
-            baseJpg = await sharpLib(baseJpg).composite([{ input: overlay, left, top }]).jpeg({ quality: 90 }).toBuffer();
+            baseJpg = await sharpLib(baseJpg).composite([{ input: logoPng, left, top, opacity: 0.12 }]).jpeg({ quality: 90 }).toBuffer();
           }
         } catch (eW2) {
           try { console.warn(`[BIN][info] 品牌水印叠加失败(JPG): ${eW2 && eW2.message ? eW2.message : eW2}`); } catch {}
