@@ -365,11 +365,12 @@ async function handleIncomingMessage(ws, event) {
     await handleTenCardMosaic(ws, event, "all");
     return;
   }
-  // 支持大小写、不带空格以及多种分隔符（空格/中英文冒号/等号/逗号/短横线）
-  const match = /^\s*bin[\s:：=,\-]*([0-9]{6})\s*$/i.exec(rawText);
+  // 支持大小写、不带空格以及多种分隔符；提取后续所有连续数字
+  const match = /^\s*bin[\s:：=,\-]*([0-9]+)/i.exec(rawText);
   if (!match) return;
-
-  const bin = match[1];
+  const digits = match[1];
+  if (digits.length < 6) return; // 小于六位忽略
+  const bin = digits.slice(0, 6); // 多于六位仅取前六位
   const url = buildRequestUrl(bin);
 
   try {
