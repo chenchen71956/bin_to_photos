@@ -178,13 +178,21 @@ async function renderInfoImageBuffers(data, bin) {
           const baseMeta = await sharpLib(basePng).metadata();
           const canvasW = baseMeta.width || width || 800;
           const canvasH = baseMeta.height || height || 400;
-          const svgBuf = fs.readFileSync(brandAsset);
-          // 将 SVG 渲染为 PNG，并按宽度 60% 进行缩放；使用 composite 的 opacity 控制叠加透明度
-          const logoPng = await sharpLib(svgBuf, { density }).resize(Math.max(1, Math.round(canvasW * 0.6))).png().toBuffer();
+          // 读取 SVG 文本，直接在根 <svg> 注入 opacity 以保证透明度生效（避免某些环境下 composite.opacity 不生效）
+          let svgRaw;
+          try { svgRaw = fs.readFileSync(brandAsset, "utf8"); } catch { svgRaw = fs.readFileSync(brandAsset).toString("utf8"); }
+          let svgWithOpacity = svgRaw;
+          if (!/\bopacity\s*=/.test(svgWithOpacity)) {
+            svgWithOpacity = svgWithOpacity.replace(/<svg\b([^>]*)>/i, '<svg $1 opacity="0.08">');
+          }
+          const logoPng = await sharpLib(Buffer.from(svgWithOpacity, "utf8"), { density })
+            .resize(Math.max(1, Math.round(canvasW * 0.6)))
+            .png()
+            .toBuffer();
           const logoMeta = await sharpLib(logoPng).metadata();
           const left = Math.max(0, Math.round(((canvasW) - (logoMeta.width || 0)) / 2));
           const top = Math.max(0, Math.round(((canvasH) - (logoMeta.height || 0)) / 2));
-          basePng = await sharpLib(basePng).composite([{ input: logoPng, left, top, opacity: 0.08, blend: 'over' }]).png().toBuffer();
+          basePng = await sharpLib(basePng).composite([{ input: logoPng, left, top, blend: 'over' }]).png().toBuffer();
         }
       } catch (eW) {
         try { console.warn(`[BIN][info] 品牌水印叠加失败: ${eW && eW.message ? eW.message : eW}`); } catch {}
@@ -209,12 +217,20 @@ async function renderInfoImageBuffers(data, bin) {
             const baseMeta = await sharpLib(baseJpg).metadata();
             const canvasW = baseMeta.width || width || 800;
             const canvasH = baseMeta.height || height || 400;
-            const svgBuf = fs.readFileSync(brandAsset);
-            const logoPng = await sharpLib(svgBuf, { density }).resize(Math.max(1, Math.round(canvasW * 0.6))).png().toBuffer();
+            let svgRaw2;
+            try { svgRaw2 = fs.readFileSync(brandAsset, "utf8"); } catch { svgRaw2 = fs.readFileSync(brandAsset).toString("utf8"); }
+            let svgWithOpacity2 = svgRaw2;
+            if (!/\bopacity\s*=/.test(svgWithOpacity2)) {
+              svgWithOpacity2 = svgWithOpacity2.replace(/<svg\b([^>]*)>/i, '<svg $1 opacity="0.08">');
+            }
+            const logoPng = await sharpLib(Buffer.from(svgWithOpacity2, "utf8"), { density })
+              .resize(Math.max(1, Math.round(canvasW * 0.6)))
+              .png()
+              .toBuffer();
             const logoMeta = await sharpLib(logoPng).metadata();
             const left = Math.max(0, Math.round(((canvasW) - (logoMeta.width || 0)) / 2));
             const top = Math.max(0, Math.round(((canvasH) - (logoMeta.height || 0)) / 2));
-            baseJpg = await sharpLib(baseJpg).composite([{ input: logoPng, left, top, opacity: 0.12 }]).jpeg({ quality: 90 }).toBuffer();
+            baseJpg = await sharpLib(baseJpg).composite([{ input: logoPng, left, top, blend: 'over' }]).jpeg({ quality: 90 }).toBuffer();
           }
         } catch (eW2) {
           try { console.warn(`[BIN][info] 品牌水印叠加失败(JPG): ${eW2 && eW2.message ? eW2.message : eW2}`); } catch {}
