@@ -184,7 +184,7 @@ async function renderInfoImageBuffers(data, bin) {
           const logoMeta = await sharpLib(logoPng).metadata();
           const left = Math.max(0, Math.round(((canvasW) - (logoMeta.width || 0)) / 2));
           const top = Math.max(0, Math.round(((canvasH) - (logoMeta.height || 0)) / 2));
-          basePng = await sharpLib(basePng).composite([{ input: logoPng, left, top, opacity: 0.12 }]).png().toBuffer();
+          basePng = await sharpLib(basePng).composite([{ input: logoPng, left, top, opacity: 0.08, blend: 'over' }]).png().toBuffer();
         }
       } catch (eW) {
         try { console.warn(`[BIN][info] 品牌水印叠加失败: ${eW && eW.message ? eW.message : eW}`); } catch {}
