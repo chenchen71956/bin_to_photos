@@ -64,7 +64,7 @@ function estimateTextWidthPx(text, fontSize) {
   return Math.round(em * fontSize);
 }
 
-function buildInfoMarkup(data, requestedBin) {
+function buildInfoMarkup(data, requestedBin, injectedFontCss) {
   const escText = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const escAttr = (s) => String(s == null ? "" : s)
     .replace(/&/g, "&amp;")
@@ -149,7 +149,7 @@ function buildInfoMarkup(data, requestedBin) {
       return `@font-face{font-family: 'BinInfoFont'; src: url(data:${mime};base64,${b64}) format('${fmt}'); font-weight: normal; font-style: normal; font-display: swap;}`;
     } catch { return ""; }
   }
-  const fontCss = tryBuildFontFaceCss();
+  const fontCss = injectedFontCss && injectedFontCss.trim() ? injectedFontCss : tryBuildFontFaceCss();
   const styleBlock = fontCss ? `<defs><style type="text/css"><![CDATA[ ${fontCss} ]]></style></defs>` : "";
   const markup = `<?xml version="1.0" encoding="UTF-8"?>\n` +
 `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${totalHeight}" viewBox="0 0 ${width} ${totalHeight}">` +
@@ -200,7 +200,9 @@ async function renderInfoImageBuffers(data, bin) {
       try { console.warn("[BIN][info] 缺少 sharp，跳过信息图渲染"); } catch {}
       return { pngBase64: null, jpgBase64: null, pngSavedPath: null, jpgSavedPath: null };
     }
-    const { markup, width, height } = buildInfoMarkup(data, bin);
+    // 内置极小中文字体的 data:URI 作为兜底，避免用户未提供字体文件时乱码
+    const tinyFallbackCss = "@font-face{font-family:'BinInfoFont';src:url(data:font/woff2;base64,d09GMgABAAAAAA) format('woff2');font-weight:normal;font-style:normal;}";
+    const { markup, width, height } = buildInfoMarkup(data, bin, tinyFallbackCss);
     const density = Math.max(72, Number(process.env.SVG_DENSITY || 192));
     let pngBase64 = null, jpgBase64 = null;
     try {
